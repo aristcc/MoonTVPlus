@@ -168,11 +168,18 @@ export async function GET(request: NextRequest) {
         throw new Error('未找到已完成的播放链接');
       }
 
-      // 如果指定了 format=json，返回 JSON 格式
+      // 如果指定了 format=json，尝试解析到最终直链后再返回 JSON
       if (format === 'json') {
+        const resolvedQualities = await Promise.all(
+          qualities.map(async (quality: any) => ({
+            ...quality,
+            url: await getFinalUrl(quality.url),
+          }))
+        );
+
         return NextResponse.json({
-          url: qualities[0].url,
-          qualities
+          url: resolvedQualities[0].url,
+          qualities: resolvedQualities,
         });
       }
 

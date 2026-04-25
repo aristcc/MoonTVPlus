@@ -3,8 +3,7 @@ import bs58 from 'bs58';
 import he from 'he';
 import Hls from 'hls.js';
 
-function getDoubanImageProxyConfig(): {
-  proxyType:
+export type DoubanImageProxyType =
   | 'direct'
   | 'server'
   | 'img3'
@@ -12,13 +11,72 @@ function getDoubanImageProxyConfig(): {
   | 'cmliussss-cdn-ali'
   | 'baidu'
   | 'custom';
+
+function normalizeDoubanImageProxyConfig(
+  proxyType: DoubanImageProxyType,
+  proxyUrl: string
+): {
+  proxyType: DoubanImageProxyType;
   proxyUrl: string;
+} {
+  const normalizedProxyUrl = proxyUrl.trim();
+
+  if (proxyType === 'custom' && !normalizedProxyUrl) {
+    return {
+      proxyType: 'server',
+      proxyUrl: '',
+    };
+  }
+
+  return {
+    proxyType,
+    proxyUrl: normalizedProxyUrl,
+  };
+}
+
+function buildDoubanImageUrl(
+  originalUrl: string,
+  proxyType: DoubanImageProxyType,
+  proxyUrl: string
+): string {
+  switch (proxyType) {
+    case 'server':
+      return `/api/image-proxy?url=${encodeURIComponent(originalUrl)}`;
+    case 'img3':
+      return originalUrl.replace(/img\d+\.doubanio\.com/g, 'img3.doubanio.com');
+    case 'cmliussss-cdn-tencent':
+      return originalUrl.replace(
+        /img\d+\.doubanio\.com/g,
+        'img.doubanio.cmliussss.net'
+      );
+    case 'cmliussss-cdn-ali':
+      return originalUrl.replace(
+        /img\d+\.doubanio\.com/g,
+        'img.doubanio.cmliussss.com'
+      );
+    case 'baidu':
+      return `https://image.baidu.com/search/down?url=${encodeURIComponent(originalUrl)}`;
+    case 'custom':
+      return proxyUrl ? `${proxyUrl}${encodeURIComponent(originalUrl)}` : originalUrl;
+    case 'direct':
+    default:
+      return originalUrl;
+  }
+}
+
+function getDoubanImageProxyConfig(): {
+  proxyType: DoubanImageProxyType;
+  proxyUrl: string;
+  backupProxyType: DoubanImageProxyType;
+  backupProxyUrl: string;
 } {
   // 确保在浏览器环境中执行
   if (typeof window === 'undefined') {
     return {
       proxyType: 'cmliussss-cdn-tencent',
       proxyUrl: '',
+      backupProxyType: 'server',
+      backupProxyUrl: '',
     };
   }
 
@@ -30,10 +88,68 @@ function getDoubanImageProxyConfig(): {
     localStorage.getItem('doubanImageProxyUrl') ||
     (window as any).RUNTIME_CONFIG?.DOUBAN_IMAGE_PROXY ||
     '';
+  const doubanImageProxyBackupType =
+    (localStorage.getItem('doubanImageProxyTypeBackup') as DoubanImageProxyType | null) ||
+    'server';
+  const doubanImageProxyBackupUrl =
+    localStorage.getItem('doubanImageProxyUrlBackup') || '';
+  const primaryConfig = normalizeDoubanImageProxyConfig(
+    doubanImageProxyType,
+    doubanImageProxy
+  );
+  const backupConfig = normalizeDoubanImageProxyConfig(
+    doubanImageProxyBackupType,
+    doubanImageProxyBackupUrl
+  );
   return {
-    proxyType: doubanImageProxyType,
-    proxyUrl: doubanImageProxy,
+    proxyType: primaryConfig.proxyType,
+    proxyUrl: primaryConfig.proxyUrl,
+    backupProxyType: backupConfig.proxyType,
+    backupProxyUrl: backupConfig.proxyUrl,
   };
+}
+
+export function getDoubanImageFallbackUrl(originalUrl: string): string | null {
+  if (!originalUrl || !originalUrl.includes('doubanio.com')) {
+    return null;
+  }
+
+  const { proxyType, proxyUrl, backupProxyType, backupProxyUrl } =
+    getDoubanImageProxyConfig();
+  const primaryUrl = buildDoubanImageUrl(originalUrl, proxyType, proxyUrl);
+  const backupUrl = buildDoubanImageUrl(
+    originalUrl,
+    backupProxyType,
+    backupProxyUrl
+  );
+
+  if (backupUrl === primaryUrl) {
+    return null;
+  }
+
+  return backupUrl;
+}
+
+export function tryApplyDoubanImageFallback(
+  target: HTMLImageElement,
+  originalUrl: string
+): boolean {
+  if (!originalUrl || !originalUrl.includes('doubanio.com')) {
+    return false;
+  }
+
+  if (target.dataset.doubanBackupTried === 'true') {
+    return false;
+  }
+
+  const fallbackUrl = getDoubanImageFallbackUrl(originalUrl);
+  if (!fallbackUrl || fallbackUrl === target.currentSrc || fallbackUrl === target.src) {
+    return false;
+  }
+
+  target.dataset.doubanBackupTried = 'true';
+  target.src = fallbackUrl;
+  return true;
 }
 
 /**
@@ -65,29 +181,7 @@ export function processImageUrl(originalUrl: string): string {
   }
 
   const { proxyType, proxyUrl } = getDoubanImageProxyConfig();
-  switch (proxyType) {
-    case 'server':
-      return `/api/image-proxy?url=${encodeURIComponent(originalUrl)}`;
-    case 'img3':
-      return originalUrl.replace(/img\d+\.doubanio\.com/g, 'img3.doubanio.com');
-    case 'cmliussss-cdn-tencent':
-      return originalUrl.replace(
-        /img\d+\.doubanio\.com/g,
-        'img.doubanio.cmliussss.net'
-      );
-    case 'cmliussss-cdn-ali':
-      return originalUrl.replace(
-        /img\d+\.doubanio\.com/g,
-        'img.doubanio.cmliussss.com'
-      );
-    case 'baidu':
-      return `https://image.baidu.com/search/down?url=${encodeURIComponent(originalUrl)}`;
-    case 'custom':
-      return `${proxyUrl}${encodeURIComponent(originalUrl)}`;
-    case 'direct':
-    default:
-      return originalUrl;
-  }
+  return buildDoubanImageUrl(originalUrl, proxyType, proxyUrl);
 }
 
 /**
@@ -155,7 +249,7 @@ export function processVideoUrl(originalUrl: string): string {
  */
 export async function getVideoResolutionFromM3u8(
   m3u8Url: string,
-  timeoutMs = 4000
+  timeoutMs = 6000
 ): Promise<{
   quality: string; // 如720p、1080p等
   loadSpeed: string; // 自动转换为KB/s或MB/s
@@ -185,11 +279,55 @@ export async function getVideoResolutionFromM3u8(
       // 固定使用hls.js加载
       const hls = new Hls();
 
-      // 设置超时处理 - 使用传入的超时时间
-      const timeout = setTimeout(() => {
+      let actualLoadSpeed = '未知';
+      let hasSpeedCalculated = false;
+      let hasMetadataLoaded = false;
+      let estimatedBitrate = 0; // 估算的码率（bps）
+
+      // 提取核心返回逻辑供 resolve 和 timeout 共同调用
+      const resolveCurrentState = () => {
+        const width = video.videoWidth;
+        const quality =
+          width >= 3840
+            ? '4K'
+            : width >= 2560
+              ? '2K'
+              : width >= 1920
+                ? '1080p'
+                : width >= 1280
+                  ? '720p'
+                  : width >= 854
+                    ? '480p'
+                    : width > 0
+                      ? 'SD'
+                      : '未知';
+
+        const bitrateStr = estimatedBitrate > 0
+          ? estimatedBitrate >= 1000000
+            ? `${(estimatedBitrate / 1000000).toFixed(1)} Mbps`
+            : `${Math.round(estimatedBitrate / 1000)} Kbps`
+          : '未知';
+
         hls.destroy();
         video.remove();
-        reject(new Error('Timeout loading video metadata'));
+
+        resolve({
+          quality,
+          loadSpeed: actualLoadSpeed,
+          pingTime: Math.round(pingTime),
+          bitrate: bitrateStr,
+        });
+      };
+
+      // 设置超时处理 - 如果部分数据已拿到，则宽容返回
+      const timeout = setTimeout(() => {
+        if (hasMetadataLoaded || hasSpeedCalculated) {
+          resolveCurrentState();
+        } else {
+          hls.destroy();
+          video.remove();
+          reject(new Error('Timeout loading video metadata'));
+        }
       }, timeoutMs);
 
       video.onerror = () => {
@@ -199,67 +337,16 @@ export async function getVideoResolutionFromM3u8(
         reject(new Error('Failed to load video metadata'));
       };
 
-      let actualLoadSpeed = '未知';
-      let hasSpeedCalculated = false;
-      let hasMetadataLoaded = false;
-      let estimatedBitrate = 0; // 估算的码率（bps）
-
       let fragmentStartTime = 0;
 
-      // 检查是否可以返回结果
+      // 检查是否可以相互满足要求
       const checkAndResolve = () => {
         if (
           hasMetadataLoaded &&
           (hasSpeedCalculated || actualLoadSpeed !== '未知')
         ) {
           clearTimeout(timeout);
-          const width = video.videoWidth;
-          if (width && width > 0) {
-            hls.destroy();
-            video.remove();
-
-            // 根据视频宽度判断视频质量等级，使用经典分辨率的宽度作为分割点
-            const quality =
-              width >= 3840
-                ? '4K' // 4K: 3840x2160
-                : width >= 2560
-                  ? '2K' // 2K: 2560x1440
-                  : width >= 1920
-                    ? '1080p' // 1080p: 1920x1080
-                    : width >= 1280
-                      ? '720p' // 720p: 1280x720
-                      : width >= 854
-                        ? '480p'
-                        : 'SD'; // 480p: 854x480
-
-            // 格式化码率
-            const bitrateStr = estimatedBitrate > 0
-              ? estimatedBitrate >= 1000000
-                ? `${(estimatedBitrate / 1000000).toFixed(1)} Mbps`
-                : `${Math.round(estimatedBitrate / 1000)} Kbps`
-              : '未知';
-
-            resolve({
-              quality,
-              loadSpeed: actualLoadSpeed,
-              pingTime: Math.round(pingTime),
-              bitrate: bitrateStr,
-            });
-          } else {
-            // webkit 无法获取尺寸，直接返回
-            const bitrateStr = estimatedBitrate > 0
-              ? estimatedBitrate >= 1000000
-                ? `${(estimatedBitrate / 1000000).toFixed(1)} Mbps`
-                : `${Math.round(estimatedBitrate / 1000)} Kbps`
-              : '未知';
-
-            resolve({
-              quality: '未知',
-              loadSpeed: actualLoadSpeed,
-              pingTime: Math.round(pingTime),
-              bitrate: bitrateStr,
-            });
-          }
+          resolveCurrentState();
         }
       };
 
@@ -309,7 +396,7 @@ export async function getVideoResolutionFromM3u8(
       });
 
       // 为分片请求添加时间戳参数破除浏览器缓存
-      hls.config.xhrSetup = function(xhr: XMLHttpRequest, url: string) {
+      hls.config.xhrSetup = function (xhr: XMLHttpRequest, url: string) {
         const urlWithTimestamp = url.includes('?')
           ? `${url}&_t=${Date.now()}`
           : `${url}?_t=${Date.now()}`;
@@ -323,6 +410,22 @@ export async function getVideoResolutionFromM3u8(
       hls.on(Hls.Events.ERROR, (event: any, data: any) => {
         console.error('HLS错误:', data);
         if (data.fatal) {
+          const statusCode = data.response?.code || data.response?.status;
+          // 防止 415 代理兜底熔断导致正常的二进制源在优选逻辑中被剔除
+          if (statusCode === 415 && (m3u8Url.includes('/api/proxy-m3u8') || m3u8Url.includes('/api/proxy/vod/m3u8'))) {
+            console.log('[测速] 测速通道嗅探到这是底层的媒体流文件，免测速通过');
+            clearTimeout(timeout);
+            hls.destroy();
+            video.remove();
+            resolve({
+              quality: '原生画质',
+              loadSpeed: '直连',
+              pingTime: 10,
+              bitrate: '未知',
+            });
+            return;
+          }
+
           clearTimeout(timeout);
           hls.destroy();
           video.remove();

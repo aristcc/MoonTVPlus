@@ -19,7 +19,6 @@
     "format:check": "prettier -c .",
     "gen:manifest": "node scripts/generate-manifest.js",
     "postbuild": "echo 'Build completed - sitemap generation disabled'",
-    "prepare": "husky install",
     "watch-room:server": "node server/watch-room-standalone-server.js --port 3001 --auth YOUR_SECRET_KEY",
     "init:sqlite": "node scripts/init-sqlite.js",
     "init:postgres": "node scripts/init-postgres.js",
@@ -66,10 +65,10 @@
     "react-dom": "^18.3.1",
     "react-icons": "^5.4.0",
     "react-markdown": "^10.1.0",
-    "react-window": "^2.2.3",
     "redis": "^4.6.7",
     "remark-gfm": "^3.0.1",
     "server-only": "^0.0.1",
+    "sharp": "^0.34.5",
     "socket.io": "^4.8.1",
     "socket.io-client": "^4.8.1",
     "swiper": "^11.2.8",
@@ -79,8 +78,6 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
-    "@commitlint/cli": "^16.3.0",
-    "@commitlint/config-conventional": "^16.2.4",
     "@opennextjs/cloudflare": "^1.15.1",
     "@svgr/webpack": "^8.1.0",
     "@tailwindcss/forms": "^0.5.10",
@@ -96,7 +93,6 @@
     "@types/pg": "^8.16.0",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^19.1.6",
-    "@types/react-window": "^2.0.0",
     "@types/testing-library__jest-dom": "^5.14.9",
     "@types/xml2js": "^0.4.14",
     "@typescript-eslint/eslint-plugin": "^5.62.0",
@@ -107,9 +103,7 @@
     "eslint-config-prettier": "^8.10.0",
     "eslint-plugin-simple-import-sort": "^7.0.0",
     "eslint-plugin-unused-imports": "^2.0.0",
-    "husky": "^7.0.4",
     "jest": "^27.5.1",
-    "lint-staged": "^12.5.0",
     "next-router-mock": "^0.9.0",
     "postcss": "^8.5.1",
     "prettier": "^2.8.8",
@@ -118,15 +112,6 @@
     "typescript": "^4.9.5",
     "vercel": "^50.4.10",
     "webpack-obfuscator": "^3.5.1"
-  },
-  "lint-staged": {
-    "**/*.{js,jsx,ts,tsx}": [
-      "eslint --max-warnings=0",
-      "prettier -w"
-    ],
-    "**/*.{json,css,scss,md,webmanifest}": [
-      "prettier -w"
-    ]
   },
   "packageManager": "pnpm@10.14.0"
 }

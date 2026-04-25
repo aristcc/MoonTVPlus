@@ -115,21 +115,21 @@ export async function POST(req: NextRequest) {
             favorites,
             searchHistory,
             skipConfigs,
-            musicPlayRecords,
+            musicV2History,
             playlists
           ] = await Promise.all([
             db.getAllPlayRecords(username),
             db.getAllFavorites(username),
             db.getSearchHistory(username),
             db.getAllSkipConfigs(username),
-            db.getAllMusicPlayRecords(username),
-            db.getUserMusicPlaylists(username)
+            db.listMusicV2History(username),
+            db.listMusicV2Playlists(username)
           ]);
 
           // 并行获取所有歌单的歌曲
           const playlistsWithSongs = await Promise.all(
             playlists.map(async (playlist) => {
-              const songs = await db.getPlaylistSongs(playlist.id);
+              const songs = await db.listMusicV2PlaylistItems(playlist.id);
               return { ...playlist, songs };
             })
           );
@@ -141,8 +141,8 @@ export async function POST(req: NextRequest) {
               favorites,
               searchHistory,
               skipConfigs,
-              musicPlayRecords,
-              musicPlaylists: playlistsWithSongs,
+              musicV2History,
+              musicV2Playlists: playlistsWithSongs,
               passwordV2: finalPasswordV2
             }
           };

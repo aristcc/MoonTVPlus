@@ -3,6 +3,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { parseStringPromise } from 'xml2js';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
+import { getConfig } from '@/lib/config';
+import { getMagnetBaseUrl, universalMagnetFetch } from '@/lib/magnet.client';
 
 export const runtime = 'nodejs';
 
@@ -56,11 +58,15 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    const baseUrl = 'http://share.dmhy.org/topics/rss/rss.xml';
+    const config = await getConfig();
+    const baseUrl = `${getMagnetBaseUrl(
+      'http://share.dmhy.org',
+      config.SiteConfig.MagnetDmhyReverseProxy
+    )}/topics/rss/rss.xml`;
     const params = new URLSearchParams({ keyword: trimmedKeyword });
     const searchUrl = `${baseUrl}?${params.toString()}`;
 
-    const response = await fetch(searchUrl, {
+    const response = await universalMagnetFetch(searchUrl, config.SiteConfig.MagnetProxy, {
       headers: {
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',

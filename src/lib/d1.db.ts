@@ -16,7 +16,9 @@ import {
   MovieRequest,
 } from './types';
 import { AdminConfig } from './admin.types';
+import { MangaReadRecord, MangaShelfItem } from './manga.types';
 import { DatabaseAdapter } from './d1-adapter';
+import { MusicV2HistoryRecord, MusicV2PlaylistItem, MusicV2PlaylistRecord } from './music-v2';
 import { userInfoCache } from './user-cache';
 
 /**
@@ -34,12 +36,37 @@ import { userInfoCache } from './user-cache';
  */
 export class D1Storage implements IStorage {
   private db: DatabaseAdapter;
+  private schemaReady: Promise<void>;
   public adapter: RedisHashAdapter;
 
   constructor(adapter: DatabaseAdapter) {
     this.db = adapter;
+    this.schemaReady = this.ensureMangaShelfColumns();
     // 创建 Redis Hash 兼容适配器用于设备管理
     this.adapter = new RedisHashAdapter(adapter);
+  }
+
+  private async ensureMangaShelfColumns(): Promise<void> {
+    const statements = [
+      'ALTER TABLE manga_shelf ADD COLUMN latest_chapter_id TEXT',
+      'ALTER TABLE manga_shelf ADD COLUMN latest_chapter_name TEXT',
+      'ALTER TABLE manga_shelf ADD COLUMN latest_chapter_count INTEGER',
+      'ALTER TABLE manga_shelf ADD COLUMN unread_chapter_count INTEGER',
+    ];
+
+    for (const statement of statements) {
+      try {
+        const result = await this.db.prepare(statement).run();
+        if (!result.success && result.error && !/duplicate column|already exists/i.test(result.error)) {
+          console.warn('D1Storage.ensureMangaShelfColumns warning:', result.error);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (!/duplicate column|already exists|no such table/i.test(message)) {
+          console.warn('D1Storage.ensureMangaShelfColumns warning:', err);
+        }
+      }
+    }
   }
 
   // ==================== 播放记录 ====================
@@ -713,6 +740,311 @@ export class D1Storage implements IStorage {
       console.error('D1Storage.isSongInPlaylist error:', err);
       return false;
     }
+  }
+
+  // ==================== Music V2 历史记录相关 ====================
+
+  async listMusicV2History(userName: string): Promise<MusicV2HistoryRecord[]> {
+    try {
+      const results = await this.db
+        .prepare('SELECT * FROM music_v2_history WHERE username = ? ORDER BY last_played_at DESC')
+        .bind(userName)
+        .all();
+
+      if (!results.results) return [];
+
+      return results.results.map((row: any) => ({
+        songId: row.song_id,
+        source: row.source,
+        songmid: row.songmid || undefined,
+        name: row.name,
+        artist: row.artist,
+        album: row.album || undefined,
+        cover: row.cover || undefined,
+        durationText: row.duration_text || undefined,
+        durationSec: row.duration_sec ?? undefined,
+        playProgressSec: row.play_progress_sec ?? 0,
+        lastPlayedAt: row.last_played_at,
+        playCount: row.play_count ?? 0,
+        lastQuality: row.last_quality || undefined,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }));
+    } catch (err) {
+      console.error('D1Storage.listMusicV2History error:', err);
+      return [];
+    }
+  }
+
+  async upsertMusicV2History(userName: string, record: MusicV2HistoryRecord): Promise<void> {
+    try {
+      await this.db
+        .prepare(`
+          INSERT INTO music_v2_history (
+            username, song_id, source, songmid, name, artist, album, cover, duration_text, duration_sec,
+            play_progress_sec, last_played_at, play_count, last_quality, created_at, updated_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(username, song_id) DO UPDATE SET
+            source = excluded.source,
+            songmid = excluded.songmid,
+            name = excluded.name,
+            artist = excluded.artist,
+            album = excluded.album,
+            cover = excluded.cover,
+            duration_text = excluded.duration_text,
+            duration_sec = excluded.duration_sec,
+            play_progress_sec = excluded.play_progress_sec,
+            last_played_at = excluded.last_played_at,
+            play_count = excluded.play_count,
+            last_quality = excluded.last_quality,
+            updated_at = excluded.updated_at
+        `)
+        .bind(
+          userName,
+          record.songId,
+          record.source,
+          record.songmid || null,
+          record.name,
+          record.artist,
+          record.album || null,
+          record.cover || null,
+          record.durationText || null,
+          record.durationSec ?? null,
+          record.playProgressSec,
+          record.lastPlayedAt,
+          record.playCount,
+          record.lastQuality || null,
+          record.createdAt,
+          record.updatedAt
+        )
+        .run();
+    } catch (err) {
+      console.error('D1Storage.upsertMusicV2History error:', err);
+      throw err;
+    }
+  }
+
+  async batchUpsertMusicV2History(userName: string, records: MusicV2HistoryRecord[]): Promise<void> {
+    for (const record of records) {
+      await this.upsertMusicV2History(userName, record);
+    }
+  }
+
+  async deleteMusicV2History(userName: string, songId: string): Promise<void> {
+    await this.db
+      .prepare('DELETE FROM music_v2_history WHERE username = ? AND song_id = ?')
+      .bind(userName, songId)
+      .run();
+  }
+
+  async clearMusicV2History(userName: string): Promise<void> {
+    await this.db
+      .prepare('DELETE FROM music_v2_history WHERE username = ?')
+      .bind(userName)
+      .run();
+  }
+
+  // ==================== Music V2 歌单相关 ====================
+
+  async createMusicV2Playlist(userName: string, playlist: {
+    id: string;
+    name: string;
+    description?: string;
+    cover?: string;
+  }): Promise<void> {
+    const now = Date.now();
+    await this.db
+      .prepare(`
+        INSERT INTO music_v2_playlists (id, username, name, description, cover, song_count, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .bind(playlist.id, userName, playlist.name, playlist.description || null, playlist.cover || null, 0, now, now)
+      .run();
+  }
+
+  async getMusicV2Playlist(playlistId: string): Promise<MusicV2PlaylistRecord | null> {
+    const row: any = await this.db
+      .prepare('SELECT * FROM music_v2_playlists WHERE id = ?')
+      .bind(playlistId)
+      .first();
+
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      username: row.username,
+      name: row.name,
+      description: row.description || undefined,
+      cover: row.cover || undefined,
+      song_count: row.song_count ?? 0,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    };
+  }
+
+  async listMusicV2Playlists(userName: string): Promise<MusicV2PlaylistRecord[]> {
+    const results = await this.db
+      .prepare('SELECT * FROM music_v2_playlists WHERE username = ? ORDER BY updated_at DESC')
+      .bind(userName)
+      .all();
+
+    if (!results.results) return [];
+
+    return results.results.map((row: any) => ({
+      id: row.id,
+      username: row.username,
+      name: row.name,
+      description: row.description || undefined,
+      cover: row.cover || undefined,
+      song_count: row.song_count ?? 0,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    }));
+  }
+
+  async updateMusicV2Playlist(playlistId: string, updates: {
+    name?: string;
+    description?: string;
+    cover?: string;
+    song_count?: number;
+  }): Promise<void> {
+    const fields: string[] = [];
+    const values: any[] = [];
+
+    if (updates.name !== undefined) {
+      fields.push('name = ?');
+      values.push(updates.name);
+    }
+    if (updates.description !== undefined) {
+      fields.push('description = ?');
+      values.push(updates.description || null);
+    }
+    if (updates.cover !== undefined) {
+      fields.push('cover = ?');
+      values.push(updates.cover || null);
+    }
+    if (updates.song_count !== undefined) {
+      fields.push('song_count = ?');
+      values.push(updates.song_count);
+    }
+
+    fields.push('updated_at = ?');
+    values.push(Date.now());
+    values.push(playlistId);
+
+    await this.db
+      .prepare(`UPDATE music_v2_playlists SET ${fields.join(', ')} WHERE id = ?`)
+      .bind(...values)
+      .run();
+  }
+
+  async deleteMusicV2Playlist(playlistId: string): Promise<void> {
+    await this.db
+      .prepare('DELETE FROM music_v2_playlists WHERE id = ?')
+      .bind(playlistId)
+      .run();
+  }
+
+  async addMusicV2PlaylistItem(playlistId: string, item: MusicV2PlaylistItem): Promise<void> {
+    const playlist = await this.getMusicV2Playlist(playlistId);
+    if (!playlist) {
+      throw new Error('歌单不存在');
+    }
+
+    const maxOrder: any = await this.db
+      .prepare('SELECT MAX(sort_order) as max_order FROM music_v2_playlist_items WHERE playlist_id = ?')
+      .bind(playlistId)
+      .first();
+    const nextOrder = Math.max(item.sortOrder || 0, (maxOrder?.max_order as number || 0) + 1);
+    const now = Date.now();
+
+    await this.db
+      .prepare(`
+        INSERT INTO music_v2_playlist_items (
+          playlist_id, username, song_id, source, songmid, name, artist, album, cover, duration_text, duration_sec, sort_order, added_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(playlist_id, song_id) DO UPDATE SET
+          source = excluded.source,
+          songmid = excluded.songmid,
+          name = excluded.name,
+          artist = excluded.artist,
+          album = excluded.album,
+          cover = excluded.cover,
+          duration_text = excluded.duration_text,
+          duration_sec = excluded.duration_sec,
+          updated_at = excluded.updated_at
+      `)
+      .bind(
+        playlistId,
+        playlist.username,
+        item.songId,
+        item.source,
+        item.songmid || null,
+        item.name,
+        item.artist,
+        item.album || null,
+        item.cover || null,
+        item.durationText || null,
+        item.durationSec ?? null,
+        nextOrder,
+        item.addedAt || now,
+        now
+      )
+      .run();
+
+    const items = await this.listMusicV2PlaylistItems(playlistId);
+    await this.updateMusicV2Playlist(playlistId, {
+      song_count: items.length,
+      cover: items[0]?.cover,
+    });
+  }
+
+  async removeMusicV2PlaylistItem(playlistId: string, songId: string): Promise<void> {
+    await this.db
+      .prepare('DELETE FROM music_v2_playlist_items WHERE playlist_id = ? AND song_id = ?')
+      .bind(playlistId, songId)
+      .run();
+
+    const items = await this.listMusicV2PlaylistItems(playlistId);
+    await this.updateMusicV2Playlist(playlistId, {
+      song_count: items.length,
+      cover: items[0]?.cover || undefined,
+    });
+  }
+
+  async listMusicV2PlaylistItems(playlistId: string): Promise<MusicV2PlaylistItem[]> {
+    const results = await this.db
+      .prepare('SELECT * FROM music_v2_playlist_items WHERE playlist_id = ? ORDER BY sort_order ASC, added_at ASC')
+      .bind(playlistId)
+      .all();
+
+    if (!results.results) return [];
+
+    return results.results.map((row: any) => ({
+      playlistId: row.playlist_id,
+      songId: row.song_id,
+      source: row.source,
+      songmid: row.songmid || undefined,
+      name: row.name,
+      artist: row.artist,
+      album: row.album || undefined,
+      cover: row.cover || undefined,
+      durationText: row.duration_text || undefined,
+      durationSec: row.duration_sec ?? undefined,
+      sortOrder: row.sort_order,
+      addedAt: row.added_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  async hasMusicV2PlaylistItem(playlistId: string, songId: string): Promise<boolean> {
+    const row = await this.db
+      .prepare('SELECT 1 FROM music_v2_playlist_items WHERE playlist_id = ? AND song_id = ? LIMIT 1')
+      .bind(playlistId, songId)
+      .first();
+    return row !== null;
   }
 
   // ==================== 辅助方法 ====================
@@ -1469,6 +1801,301 @@ export class D1Storage implements IStorage {
     }
   }
 
+  // ==================== 漫画书架 ====================
+
+  async getMangaShelf(userName: string, key: string): Promise<MangaShelfItem | null> {
+    try {
+      await this.schemaReady;
+      const result = await this.db
+        .prepare('SELECT * FROM manga_shelf WHERE username = ? AND key = ?')
+        .bind(userName, key)
+        .first();
+
+      if (!result) return null;
+      return {
+        title: result.title as string,
+        cover: (result.cover as string) || '',
+        sourceId: result.source_id as string,
+        sourceName: result.source_name as string,
+        mangaId: result.manga_id as string,
+        saveTime: Number(result.save_time || 0),
+        description: (result.description as string) || undefined,
+        author: (result.author as string) || undefined,
+        status: (result.status as string) || undefined,
+        lastChapterId: (result.last_chapter_id as string) || undefined,
+        lastChapterName: (result.last_chapter_name as string) || undefined,
+        latestChapterId: (result.latest_chapter_id as string) || undefined,
+        latestChapterName: (result.latest_chapter_name as string) || undefined,
+        latestChapterCount:
+          result.latest_chapter_count === null || result.latest_chapter_count === undefined
+            ? undefined
+            : Number(result.latest_chapter_count),
+        unreadChapterCount:
+          result.unread_chapter_count === null || result.unread_chapter_count === undefined
+            ? undefined
+            : Number(result.unread_chapter_count),
+      };
+    } catch (err) {
+      console.error('D1Storage.getMangaShelf error:', err);
+      throw err;
+    }
+  }
+
+  async setMangaShelf(userName: string, key: string, item: MangaShelfItem): Promise<void> {
+    try {
+      await this.schemaReady;
+      await this.db
+        .prepare(`
+          INSERT INTO manga_shelf (
+            username, key, source_id, source_name, manga_id, title, cover, save_time,
+            description, author, status, last_chapter_id, last_chapter_name,
+            latest_chapter_id, latest_chapter_name, latest_chapter_count, unread_chapter_count
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(username, key) DO UPDATE SET
+            source_id = excluded.source_id,
+            source_name = excluded.source_name,
+            manga_id = excluded.manga_id,
+            title = excluded.title,
+            cover = excluded.cover,
+            save_time = excluded.save_time,
+            description = excluded.description,
+            author = excluded.author,
+            status = excluded.status,
+            last_chapter_id = excluded.last_chapter_id,
+            last_chapter_name = excluded.last_chapter_name,
+            latest_chapter_id = excluded.latest_chapter_id,
+            latest_chapter_name = excluded.latest_chapter_name,
+            latest_chapter_count = excluded.latest_chapter_count,
+            unread_chapter_count = excluded.unread_chapter_count
+        `)
+        .bind(
+          userName,
+          key,
+          item.sourceId,
+          item.sourceName,
+          item.mangaId,
+          item.title,
+          item.cover || '',
+          item.saveTime,
+          item.description || null,
+          item.author || null,
+          item.status || null,
+          item.lastChapterId || null,
+          item.lastChapterName || null,
+          item.latestChapterId || null,
+          item.latestChapterName || null,
+          item.latestChapterCount ?? null,
+          item.unreadChapterCount ?? null
+        )
+        .run();
+    } catch (err) {
+      console.error('D1Storage.setMangaShelf error:', err);
+      throw err;
+    }
+  }
+
+  async getAllMangaShelf(userName: string): Promise<{ [key: string]: MangaShelfItem }> {
+    try {
+      await this.schemaReady;
+      const results = await this.db
+        .prepare('SELECT * FROM manga_shelf WHERE username = ? ORDER BY save_time DESC')
+        .bind(userName)
+        .all();
+
+      const shelves: { [key: string]: MangaShelfItem } = {};
+      if (!results.results) return shelves;
+
+      for (const row of results.results) {
+        shelves[row.key as string] = {
+          title: row.title as string,
+          cover: (row.cover as string) || '',
+          sourceId: row.source_id as string,
+          sourceName: row.source_name as string,
+          mangaId: row.manga_id as string,
+          saveTime: Number(row.save_time || 0),
+          description: (row.description as string) || undefined,
+          author: (row.author as string) || undefined,
+          status: (row.status as string) || undefined,
+          lastChapterId: (row.last_chapter_id as string) || undefined,
+          lastChapterName: (row.last_chapter_name as string) || undefined,
+          latestChapterId: (row.latest_chapter_id as string) || undefined,
+          latestChapterName: (row.latest_chapter_name as string) || undefined,
+          latestChapterCount:
+            row.latest_chapter_count === null || row.latest_chapter_count === undefined
+              ? undefined
+              : Number(row.latest_chapter_count),
+          unreadChapterCount:
+            row.unread_chapter_count === null || row.unread_chapter_count === undefined
+              ? undefined
+              : Number(row.unread_chapter_count),
+        };
+      }
+
+      return shelves;
+    } catch (err) {
+      console.error('D1Storage.getAllMangaShelf error:', err);
+      throw err;
+    }
+  }
+
+  async deleteMangaShelf(userName: string, key: string): Promise<void> {
+    try {
+      await this.db
+        .prepare('DELETE FROM manga_shelf WHERE username = ? AND key = ?')
+        .bind(userName, key)
+        .run();
+    } catch (err) {
+      console.error('D1Storage.deleteMangaShelf error:', err);
+      throw err;
+    }
+  }
+
+  // ==================== 漫画阅读历史 ====================
+
+  async getMangaReadRecord(userName: string, key: string): Promise<MangaReadRecord | null> {
+    try {
+      const result = await this.db
+        .prepare('SELECT * FROM manga_read_records WHERE username = ? AND key = ?')
+        .bind(userName, key)
+        .first();
+
+      if (!result) return null;
+      return {
+        title: result.title as string,
+        cover: (result.cover as string) || '',
+        sourceId: result.source_id as string,
+        sourceName: result.source_name as string,
+        mangaId: result.manga_id as string,
+        chapterId: result.chapter_id as string,
+        chapterName: result.chapter_name as string,
+        pageIndex: Number(result.page_index || 0),
+        pageCount: Number(result.page_count || 0),
+        saveTime: Number(result.save_time || 0),
+      };
+    } catch (err) {
+      console.error('D1Storage.getMangaReadRecord error:', err);
+      throw err;
+    }
+  }
+
+  async setMangaReadRecord(userName: string, key: string, record: MangaReadRecord): Promise<void> {
+    try {
+      await this.db
+        .prepare(`
+          INSERT INTO manga_read_records (
+            username, key, source_id, source_name, manga_id, title, cover,
+            chapter_id, chapter_name, page_index, page_count, save_time
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(username, key) DO UPDATE SET
+            source_id = excluded.source_id,
+            source_name = excluded.source_name,
+            manga_id = excluded.manga_id,
+            title = excluded.title,
+            cover = excluded.cover,
+            chapter_id = excluded.chapter_id,
+            chapter_name = excluded.chapter_name,
+            page_index = excluded.page_index,
+            page_count = excluded.page_count,
+            save_time = excluded.save_time
+        `)
+        .bind(
+          userName,
+          key,
+          record.sourceId,
+          record.sourceName,
+          record.mangaId,
+          record.title,
+          record.cover || '',
+          record.chapterId,
+          record.chapterName,
+          record.pageIndex,
+          record.pageCount,
+          record.saveTime
+        )
+        .run();
+    } catch (err) {
+      console.error('D1Storage.setMangaReadRecord error:', err);
+      throw err;
+    }
+  }
+
+  async getAllMangaReadRecords(userName: string): Promise<{ [key: string]: MangaReadRecord }> {
+    try {
+      const results = await this.db
+        .prepare('SELECT * FROM manga_read_records WHERE username = ? ORDER BY save_time DESC')
+        .bind(userName)
+        .all();
+
+      const records: { [key: string]: MangaReadRecord } = {};
+      if (!results.results) return records;
+
+      for (const row of results.results) {
+        records[row.key as string] = {
+          title: row.title as string,
+          cover: (row.cover as string) || '',
+          sourceId: row.source_id as string,
+          sourceName: row.source_name as string,
+          mangaId: row.manga_id as string,
+          chapterId: row.chapter_id as string,
+          chapterName: row.chapter_name as string,
+          pageIndex: Number(row.page_index || 0),
+          pageCount: Number(row.page_count || 0),
+          saveTime: Number(row.save_time || 0),
+        };
+      }
+
+      return records;
+    } catch (err) {
+      console.error('D1Storage.getAllMangaReadRecords error:', err);
+      throw err;
+    }
+  }
+
+  async deleteMangaReadRecord(userName: string, key: string): Promise<void> {
+    try {
+      await this.db
+        .prepare('DELETE FROM manga_read_records WHERE username = ? AND key = ?')
+        .bind(userName, key)
+        .run();
+    } catch (err) {
+      console.error('D1Storage.deleteMangaReadRecord error:', err);
+      throw err;
+    }
+  }
+
+  async cleanupOldMangaReadRecords(userName: string): Promise<void> {
+    try {
+      const maxRecords = parseInt(process.env.MAX_MANGA_HISTORY_PER_USER || '100', 10);
+      const threshold = maxRecords + 10;
+      const countResult = await this.db
+        .prepare('SELECT COUNT(*) as count FROM manga_read_records WHERE username = ?')
+        .bind(userName)
+        .first();
+
+      const count = Number(countResult?.count || 0);
+      if (count <= threshold) return;
+
+      await this.db
+        .prepare(`
+          DELETE FROM manga_read_records
+          WHERE username = ?
+          AND key NOT IN (
+            SELECT key FROM manga_read_records
+            WHERE username = ?
+            ORDER BY save_time DESC
+            LIMIT ?
+          )
+        `)
+        .bind(userName, userName, maxRecords)
+        .run();
+    } catch (err) {
+      console.error('D1Storage.cleanupOldMangaReadRecords error:', err);
+      throw err;
+    }
+  }
+
   // ==================== 跳过配置 ====================
 
   async getSkipConfig(userName: string, source: string, id: string): Promise<SkipConfig | null> {
@@ -1929,7 +2556,15 @@ export class D1Storage implements IStorage {
         'play_records',
         'favorites',
         'search_history',
+        'manga_shelf',
+        'manga_read_records',
         'skip_configs',
+        'music_play_records',
+        'music_playlists',
+        'music_playlist_songs',
+        'music_v2_history',
+        'music_v2_playlists',
+        'music_v2_playlist_items',
         'danmaku_filter_configs',
         'notifications',
         'movie_requests',

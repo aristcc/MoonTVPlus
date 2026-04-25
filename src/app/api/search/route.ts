@@ -5,8 +5,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getAvailableApiSites, getCacheTime, getConfig } from '@/lib/config';
 import { searchFromApi } from '@/lib/downstream';
-import { yellowWords } from '@/lib/yellow';
 import { getProxyToken } from '@/lib/emby-token';
+import {
+  executeSavedSourceScript,
+  listEnabledSourceScripts,
+  normalizeScriptSearchResults,
+  normalizeScriptSources,
+} from '@/lib/source-script';
+import { yellowWords } from '@/lib/yellow';
 
 export const runtime = 'nodejs';
 
@@ -83,6 +89,7 @@ export async function GET(request: NextRequest) {
             id: item.Id,
             source: sourceValue,
             source_name: sourceName,
+            weight: weightMap.get(sourceValue) ?? 0,
             title: item.Name,
             poster: client.getImageUrl(item.Id, 'Primary', undefined, client.isProxyEnabled() ? proxyToken || undefined : undefined),
             episodes: [],
@@ -138,6 +145,7 @@ export async function GET(request: NextRequest) {
                   id: folderName,
                   source: 'openlist',
                   source_name: '私人影库',
+                  weight: weightMap.get('openlist') ?? 0,
                   title: info.title,
                   poster: getTMDBImageUrl(info.poster_path),
                   episodes: [],
@@ -176,24 +184,81 @@ export async function GET(request: NextRequest) {
     })
   );
 
+  const scriptSummaries = await listEnabledSourceScripts();
+  const scriptPromises = scriptSummaries.map((script) =>
+    Promise.race([
+      (async () => {
+        try {
+          const sourcesExecution = await executeSavedSourceScript({
+            key: script.key,
+            hook: 'getSources',
+            payload: {},
+          });
+          const sources = normalizeScriptSources(sourcesExecution.result);
+
+          const searchResults = await Promise.all(
+            sources.map(async (source) => {
+              const execution = await executeSavedSourceScript({
+                key: script.key,
+                hook: 'search',
+                payload: {
+                  keyword: query,
+                  page: 1,
+                  sourceId: source.id,
+                },
+              });
+
+              return normalizeScriptSearchResults({
+                scriptKey: script.key,
+                scriptName: script.name,
+                sourceId: source.id,
+                sourceName: source.name,
+                result: execution.result,
+              });
+            })
+          );
+
+          return searchResults.flat();
+        } catch (error) {
+          console.error(`[Search] 搜索脚本 ${script.name} 失败:`, error);
+          return [];
+        }
+      })(),
+      new Promise<any[]>((_, reject) =>
+        setTimeout(() => reject(new Error(`${script.name} timeout`)), 20000)
+      ),
+    ]).catch((error) => {
+      console.error(`[Search] 搜索脚本 ${script.name} 超时:`, error);
+      return [];
+    })
+  );
+
   try {
     const allResults = await Promise.all([
       openlistPromise,
       ...embyPromises,
       ...searchPromises,
+      ...scriptPromises,
     ]);
 
     // 分离结果：第一个是 openlist，接下来是 emby 结果，最后是 api 结果
     // 添加安全检查，确保即使某个结果处理出错也不影响其他结果
     const openlistResults = Array.isArray(allResults[0]) ? allResults[0] : [];
     const embyResultsArray = allResults.slice(1, 1 + embyPromises.length);
-    const apiResults = allResults.slice(1 + embyPromises.length);
+    const apiResults = allResults.slice(1 + embyPromises.length, 1 + embyPromises.length + searchPromises.length);
+    const scriptResults = allResults.slice(1 + embyPromises.length + searchPromises.length);
 
     // 合并所有 Emby 结果，添加安全检查
     const embyResults = embyResultsArray.filter(Array.isArray).flat();
     const apiResultsFlat = apiResults.filter(Array.isArray).flat();
+    const scriptResultsFlat = scriptResults.filter(Array.isArray).flat();
 
-    let flattenedResults = [...openlistResults, ...embyResults, ...apiResultsFlat];
+    let flattenedResults = [...openlistResults, ...embyResults, ...apiResultsFlat, ...scriptResultsFlat];
+
+    flattenedResults = flattenedResults.map((result) => ({
+      ...result,
+      weight: result.weight ?? (weightMap.get(result.source) ?? 0),
+    }));
 
     if (!config.SiteConfig.DisableYellowFilter) {
       flattenedResults = flattenedResults.filter((result) => {
@@ -204,8 +269,8 @@ export async function GET(request: NextRequest) {
 
     // 按权重降序排序
     flattenedResults.sort((a, b) => {
-      const weightA = weightMap.get(a.source) ?? 0;
-      const weightB = weightMap.get(b.source) ?? 0;
+      const weightA = a.weight ?? 0;
+      const weightB = b.weight ?? 0;
       return weightB - weightA;
     });
 

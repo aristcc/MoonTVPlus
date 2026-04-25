@@ -295,30 +295,43 @@ export async function POST(req: NextRequest) {
               }
             })(),
 
-            // 导入音乐播放记录（批量）
+            // 导入音乐 V2 播放记录（批量）
             (async () => {
-              if (user.musicPlayRecords) {
-                const entries = Object.entries(user.musicPlayRecords);
-                for (let j = 0; j < entries.length; j += DATA_BATCH_SIZE) {
-                  const batch = entries.slice(j, j + DATA_BATCH_SIZE);
-                  await Promise.all(
-                    batch.map(([key, record]) => {
-                      const [platform, id] = key.split('+');
-                      if (platform && id) {
-                        return db.saveMusicPlayRecord(username, platform, id, record as any);
-                      }
-                      return Promise.resolve();
-                    })
+              const historyRecords = Array.isArray(user.musicV2History)
+                ? user.musicV2History
+                : [];
+
+              if (historyRecords.length > 0) {
+                for (let j = 0; j < historyRecords.length; j += DATA_BATCH_SIZE) {
+                  const batch = historyRecords.slice(j, j + DATA_BATCH_SIZE);
+                  await db.batchUpsertMusicV2History(
+                    username,
+                    batch.map((record: any) => ({
+                      ...record,
+                      source: record.source,
+                      songId: record.songId,
+                      name: record.name,
+                      artist: record.artist,
+                      playProgressSec: record.playProgressSec || 0,
+                      lastPlayedAt: record.lastPlayedAt || Date.now(),
+                      playCount: record.playCount || 1,
+                      createdAt: record.createdAt || Date.now(),
+                      updatedAt: record.updatedAt || Date.now(),
+                    }))
                   );
                 }
               }
             })(),
 
-            // 导入音乐歌单
+            // 导入音乐 V2 歌单
             (async () => {
-              if (user.musicPlaylists && Array.isArray(user.musicPlaylists)) {
-                for (const playlist of user.musicPlaylists) {
-                  await db.createMusicPlaylist(username, {
+              const playlists = Array.isArray(user.musicV2Playlists)
+                ? user.musicV2Playlists
+                : [];
+
+              if (playlists.length > 0) {
+                for (const playlist of playlists) {
+                  await db.createMusicV2Playlist(username, {
                     id: playlist.id,
                     name: playlist.name,
                     description: playlist.description,
@@ -330,15 +343,27 @@ export async function POST(req: NextRequest) {
                     for (let j = 0; j < playlist.songs.length; j += DATA_BATCH_SIZE) {
                       const batch = playlist.songs.slice(j, j + DATA_BATCH_SIZE);
                       await Promise.all(
-                        batch.map((song: any) =>
-                          db.addSongToPlaylist(playlist.id, {
-                            platform: song.platform,
-                            id: song.id,
+                        batch.map((song: any, index: number) =>
+                          db.addMusicV2PlaylistItem(playlist.id, {
+                            playlistId: playlist.id,
+                            songId: song.songId || song.id,
+                            source: song.source || song.platform,
+                            songmid: song.songmid,
                             name: song.name,
                             artist: song.artist,
                             album: song.album,
-                            pic: song.pic,
-                            duration: song.duration || 0,
+                            cover: song.cover || song.pic,
+                            durationSec: song.durationSec || song.duration || 0,
+                            durationText: song.durationText,
+                            hash: song.hash,
+                            copyrightId: song.copyrightId,
+                            albumId: song.albumId,
+                            lrcUrl: song.lrcUrl,
+                            mrcUrl: song.mrcUrl,
+                            trcUrl: song.trcUrl,
+                            sortOrder: song.sortOrder ?? (j + index),
+                            addedAt: song.addedAt || Date.now(),
+                            updatedAt: song.updatedAt || Date.now(),
                           })
                         )
                       );

@@ -4,16 +4,11 @@
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import {
-  getAllMusicPlayRecords,
-  saveMusicPlayRecord,
-  MusicPlayRecord,
-  deleteMusicPlayRecord,
-  clearAllMusicPlayRecords,
-} from '@/lib/db.client';
 import AddToPlaylistModal from '@/components/AddToPlaylistModal';
 import Toast, { ToastProps } from '@/components/Toast';
 import LyricsPiPWindow from '@/components/LyricsPiPWindow';
+
+type MusicSource = 'wy' | 'tx' | 'kw' | 'kg' | 'mg';
 
 interface Song {
   id: string;
@@ -21,11 +16,14 @@ interface Song {
   artist: string;
   album?: string;
   pic?: string;
-  platform: 'netease' | 'qq' | 'kuwo'; // 添加平台信息
+  platform: MusicSource;
+  duration?: number;
+  durationText?: string;
+  songmid?: string;
 }
 
 interface PlayRecord {
-  platform: 'netease' | 'qq' | 'kuwo';
+  platform: MusicSource;
   id: string;
   playTime: number; // 播放时间（秒）
   duration: number; // 总时长（秒）
@@ -35,25 +33,30 @@ interface PlayRecord {
 interface LyricLine {
   time: number;
   text: string;
+  translation?: string;
 }
 
 interface Playlist {
   id: string;
   name: string;
-  pic: string;
+  pic?: string;
+  source?: MusicSource;
   updateFrequency?: string;
 }
 
 interface DbRecord {
-  platform: 'netease' | 'qq' | 'kuwo';
+  source: MusicSource;
+  songId: string;
   id: string;
-  play_time: number;
-  duration: number;
-  save_time: number;
+  playProgressSec: number;
+  durationSec: number;
+  lastPlayedAt: number;
   name: string;
   artist: string;
   album?: string;
-  pic?: string;
+  cover?: string;
+  durationText?: string;
+  songmid?: string;
 }
 
 // 扩展 Window 接口以支持 Document PiP API
@@ -68,7 +71,7 @@ declare global {
 
 export default function MusicPage() {
   const router = useRouter();
-  const [currentSource, setCurrentSource] = useState<'netease' | 'qq' | 'kuwo'>('netease');
+  const [currentSource, setCurrentSource] = useState<MusicSource>('wy');
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [songs, setSongs] = useState<Song[]>([]);
   const [currentView, setCurrentView] = useState<'playlists' | 'songs' | 'myPlaylists'>('playlists');
@@ -85,6 +88,10 @@ export default function MusicPage() {
   const [showPlayer, setShowPlayer] = useState(false);
   const [loading, setLoading] = useState(false);
   const [showLyrics, setShowLyrics] = useState(false);
+  const [musicProxyEnabled, setMusicProxyEnabled] = useState(() => {
+    if (typeof window === 'undefined') return true;
+    return (window as any).RUNTIME_CONFIG?.MUSIC_PROXY_ENABLED !== false;
+  });
   const [lyrics, setLyrics] = useState<LyricLine[]>([]);
   const [currentLyricIndex, setCurrentLyricIndex] = useState(-1);
   const [currentSongUrl, setCurrentSongUrl] = useState('');
@@ -93,8 +100,10 @@ export default function MusicPage() {
   const [showPlaylist, setShowPlaylist] = useState(false);
   const [playlistIndex, setPlaylistIndex] = useState(-1); // 当前在播放列表中的索引
   const [showQualityMenu, setShowQualityMenu] = useState(false); // 音质选择菜单
+  const [showSourceMenu, setShowSourceMenu] = useState(false); // 移动端音源菜单
   const [showVolumeSlider, setShowVolumeSlider] = useState(false); // 音量滑块显示状态
   const [pendingSongToPlay, setPendingSongToPlay] = useState<{ platform: string; id: string } | null>(null); // 待播放的歌曲信息
+  const [resolvingCount, setResolvingCount] = useState(0); // 当前解析中的歌曲数量
   const [showAddToPlaylistModal, setShowAddToPlaylistModal] = useState(false); // 添加到歌单弹窗
   const [songToAddToPlaylist, setSongToAddToPlaylist] = useState<Song | null>(null); // 要添加到歌单的歌曲
 
@@ -134,18 +143,120 @@ export default function MusicPage() {
   const restoredTimeRef = useRef<number>(0);
   const songStartTimeRef = useRef<number>(0); // 歌曲开始播放的时间戳
 
-  // 工具函数：处理图片 URL（在 HTTPS 环境下代理 HTTP 图片）
-  const processImageUrl = (url: string | undefined, platform: string): string | undefined => {
-    if (!url) return url;
+  const mapSong = (song: any): Song => ({
+    id: song.songId || song.id,
+    name: song.name,
+    artist: song.artist,
+    album: song.album,
+    pic: song.cover || song.pic,
+    platform: normalizeSource(song.source || song.platform),
+    duration: song.durationSec || song.duration,
+    durationText: song.durationText || song.interval,
+    songmid: song.songmid,
+  });
 
-    const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
-
-    // 只对酷我音乐的 HTTP 图片在 HTTPS 环境下进行代理
-    if (platform === 'kuwo' && isHttps && url.startsWith('http://')) {
-      return `/api/music/proxy?url=${encodeURIComponent(url)}`;
+  const normalizeSource = (source: string | undefined): MusicSource => {
+    switch (source) {
+      case 'netease': return 'wy';
+      case 'qq': return 'tx';
+      case 'kuwo': return 'kw';
+      case 'wy':
+      case 'tx':
+      case 'kw':
+      case 'kg':
+      case 'mg':
+        return source;
+      default:
+        return 'wy';
     }
+  };
 
-    return url;
+  const musicSources: Array<{ key: MusicSource; label: string }> = [
+    { key: 'wy', label: '网易云' },
+    { key: 'tx', label: 'QQ' },
+    { key: 'kw', label: '酷我' },
+    { key: 'kg', label: '酷狗' },
+    { key: 'mg', label: '咪咕' },
+  ];
+
+  const buildStreamUrl = (song: Song, source: MusicSource, songQuality: '128k' | '320k' | 'flac' | 'flac24bit') => {
+    const params = new URLSearchParams({
+      songId: song.id,
+      source,
+      quality: songQuality,
+      songmid: song.songmid || song.id.split('_').slice(1).join('_'),
+      name: song.name,
+      artist: song.artist,
+    });
+
+    if (song.durationText) params.set('durationText', song.durationText);
+
+    return `/api/music/v2/stream?${params.toString()}`;
+  };
+
+  const getMusicProxyEnabled = () => {
+    if (typeof window === 'undefined') return true;
+    return (window as any).RUNTIME_CONFIG?.MUSIC_PROXY_ENABLED !== false;
+  };
+
+  const fetchPlayData = async (
+    song: Song,
+    source: MusicSource,
+    songQuality: '128k' | '320k' | 'flac' | 'flac24bit',
+    includeUrl = false
+  ) => {
+    const response = await fetch('/api/music/v2/play', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        includeUrl,
+        song: {
+          songId: song.id,
+          source,
+          songmid: song.songmid,
+          name: song.name,
+          artist: song.artist,
+          album: song.album,
+          cover: song.pic,
+          durationSec: song.duration,
+          durationText: song.durationText,
+        },
+        quality: songQuality,
+      }),
+    });
+
+    return response.json();
+  };
+
+  const beginResolving = () => {
+    setResolvingCount((prev) => prev + 1);
+  };
+
+  const endResolving = () => {
+    setResolvingCount((prev) => Math.max(0, prev - 1));
+  };
+
+  const saveHistoryRecord = async (record: PlayRecord, song: Song, playTime: number, totalDuration: number) => {
+    await fetch('/api/music/v2/history', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        song: {
+          songId: record.id,
+          source: record.platform,
+          songmid: song.songmid,
+          name: song.name,
+          artist: song.artist,
+          album: song.album,
+          cover: song.pic,
+          durationSec: totalDuration || song.duration || 0,
+          durationText: song.durationText,
+        },
+        playProgressSec: playTime,
+        lastPlayedAt: Date.now(),
+        lastQuality: quality,
+      }),
+    });
   };
 
   // 保存播放状态到 localStorage
@@ -178,45 +289,37 @@ export default function MusicPage() {
     // 此函数已不再使用，所有状态恢复都在 initializePlayState 中完成
   };
 
+  useEffect(() => {
+    setMusicProxyEnabled(getMusicProxyEnabled());
+  }, []);
+
   // 页面加载时恢复播放状态和数据库记录
   useEffect(() => {
     const initializePlayState = async () => {
       try {
-        // 1. 直接从 API 同步加载播放记录（阻塞等待，不使用缓存）
-        const response = await fetch('/api/music/playrecords');
-        const dbRecords = await response.json();
+        const response = await fetch('/api/music/v2/history');
+        const history = await response.json();
+        const dbRecords = (history.data?.records || []) as DbRecord[];
 
-        // 将数据库记录转换为前端格式
-        const records: PlayRecord[] = [];
-        const songs: Song[] = [];
+        const sortedRecords: PlayRecord[] = dbRecords.map((record) => ({
+          platform: record.source,
+          id: record.songId,
+          playTime: record.playProgressSec,
+          duration: record.durationSec || 0,
+          timestamp: record.lastPlayedAt,
+        }));
 
-        Object.entries(dbRecords).forEach(([key, record]) => {
-          const dbRecord = record as DbRecord;
-          records.push({
-            platform: dbRecord.platform,
-            id: dbRecord.id,
-            playTime: dbRecord.play_time,
-            duration: dbRecord.duration,
-            timestamp: dbRecord.save_time,
-          });
-
-          songs.push({
-            id: dbRecord.id,
-            name: dbRecord.name,
-            artist: dbRecord.artist,
-            album: dbRecord.album,
-            pic: dbRecord.pic,
-            platform: dbRecord.platform,
-          });
-        });
-
-        // 按 save_time 倒序排序
-        const sortedIndices = records
-          .map((record, index) => ({ record, index }))
-          .sort((a, b) => b.record.timestamp - a.record.timestamp);
-
-        const sortedRecords = sortedIndices.map(item => records[item.index]);
-        const sortedSongs = sortedIndices.map(item => songs[item.index]);
+        const sortedSongs: Song[] = dbRecords.map((record) => ({
+          id: record.songId,
+          name: record.name,
+          artist: record.artist,
+          album: record.album,
+          pic: record.cover,
+          platform: record.source,
+          duration: record.durationSec,
+          durationText: record.durationText,
+          songmid: record.songmid,
+        }));
 
         // 2. 更新播放列表
         if (sortedRecords.length > 0) {
@@ -231,7 +334,7 @@ export default function MusicPage() {
         // 恢复配置状态（不包括歌曲）
         setSongs(playState.songs || []);
         setCurrentPlaylistTitle(playState.currentPlaylistTitle || '');
-        setCurrentSource(playState.currentSource || 'netease');
+        setCurrentSource(normalizeSource(playState.currentSource));
         setCurrentView(playState.currentView || 'playlists');
         setQuality(playState.quality || '320k');
         setPlayMode(playState.playMode || 'loop');
@@ -239,6 +342,8 @@ export default function MusicPage() {
 
         // 4. 使用数据库的最新记录（歌曲和进度都从数据库获取）
         if (sortedRecords.length > 0) {
+          const proxyEnabled = getMusicProxyEnabled();
+          setMusicProxyEnabled(proxyEnabled);
           const latestDbRecord = sortedRecords[0];
           const latestDbSong = sortedSongs[0];
 
@@ -251,54 +356,46 @@ export default function MusicPage() {
           const dbPlayTime = latestDbRecord.playTime || 0;
           songStartTimeRef.current = Date.now();
 
-          // 5. 同步解析歌曲获取播放链接（阻塞等待）
-          const platform = latestDbSong.platform || 'netease';
+          const platform = latestDbSong.platform || 'kw';
+          const selectedQuality = playState.quality || '320k';
 
-          console.log('开始解析歌曲:', platform, latestDbSong.id);
+          const restoreTime = () => {
+            if (audioRef.current && dbPlayTime > 0) {
+              audioRef.current.currentTime = dbPlayTime;
+            }
+          };
 
-          const parseResponse = await fetch('/api/music', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              action: 'parse',
-              platform: platform,
-              ids: latestDbSong.id,
-              quality: playState.quality || '320k',
-            }),
-          });
+          if (proxyEnabled) {
+            const streamUrl = buildStreamUrl(latestDbSong, platform, selectedQuality);
+            setCurrentSongUrl(streamUrl);
 
-          let data = await parseResponse.json();
-          // 执行前端 transform（如果有）
-          data = executeTransform(data);
+            if (audioRef.current) {
+              audioRef.current.src = streamUrl;
+              audioRef.current.addEventListener('loadedmetadata', restoreTime, { once: true });
+              audioRef.current.load();
+            }
 
-          if (data.code === 0 && data.data?.data && data.data.data.length > 0) {
-            const songData = data.data.data[0];
+            fetchPlayData(latestDbSong, platform, selectedQuality, false)
+              .then((data) => {
+                if (data.success && data.data?.lyric?.lyric) {
+                  const parsedLyrics = parseLyric(data.data.lyric.lyric, data.data.lyric.tlyric);
+                  setLyrics(parsedLyrics);
+                }
+              })
+              .catch((error) => {
+                console.error('加载歌词失败:', error);
+              });
+          } else {
+            const data = await fetchPlayData(latestDbSong, platform, selectedQuality, true);
+            if (data.success && data.data?.play?.directUrl && audioRef.current) {
+              setCurrentSongUrl(data.data.play.directUrl);
+              audioRef.current.src = data.data.play.directUrl;
+              audioRef.current.addEventListener('loadedmetadata', restoreTime, { once: true });
+              audioRef.current.load();
 
-            if (songData.url && songData.success) {
-              let playUrl = songData.url;
-              if (platform === 'kuwo') {
-                playUrl = `/api/music/proxy?url=${encodeURIComponent(songData.url)}`;
-              }
-
-              setCurrentSongUrl(songData.url);
-
-              if (songData.lyrics) {
-                const parsedLyrics = parseLyric(songData.lyrics);
+              if (data.data.lyric?.lyric) {
+                const parsedLyrics = parseLyric(data.data.lyric.lyric, data.data.lyric.tlyric);
                 setLyrics(parsedLyrics);
-              }
-
-              // 6. 等待所有数据准备好后，再设置音频源和进度
-              if (audioRef.current) {
-                audioRef.current.src = playUrl;
-
-                const restoreTime = () => {
-                  if (audioRef.current && dbPlayTime > 0) {
-                    audioRef.current.currentTime = dbPlayTime;
-                  }
-                };
-
-                audioRef.current.addEventListener('loadedmetadata', restoreTime, { once: true });
-                audioRef.current.load();
               }
             }
           }
@@ -366,35 +463,24 @@ export default function MusicPage() {
     }
   }, [volume]);
 
-  // 执行前端 transform（用于 Cloudflare 环境）
-  const executeTransform = (data: any) => {
-    if (data && typeof data === 'object' && data.__transform) {
-      try {
-        // eslint-disable-next-line no-eval
-        const transformFn = eval(`(${data.__transform})`);
-        delete data.__transform; // 删除 transform 字段
-        return transformFn(data);
-      } catch (err) {
-        console.error('[Frontend] Transform 函数执行失败:', err);
-        delete data.__transform;
-        return data;
-      }
-    }
-    return data;
-  };
-
   // 加载排行榜列表
   const loadPlaylists = async (source: string) => {
     setLoading(true);
     try {
-      const response = await fetch(
-        `/api/music?action=toplists&platform=${source}`
-      );
-      let data = await response.json();
-      // 执行前端 transform（如果有）
-      data = executeTransform(data);
-      // 确保返回的是数组
-      setPlaylists(Array.isArray(data) ? data : []);
+      const boardsResponse = await fetch(`/api/music/v2/discovery/boards?source=${source}`);
+      const boardsData = await boardsResponse.json();
+
+      if (boardsResponse.ok && boardsData.success) {
+        setPlaylists((boardsData.data?.list || []).map((item: any) => ({
+          id: item.id,
+          name: item.name,
+          source: normalizeSource(item.source || boardsData.data?.source || source),
+          updateFrequency: item.updateFrequency || item.description || '',
+        })));
+      } else {
+        console.error('加载排行榜失败:', boardsData);
+        setPlaylists([]);
+      }
     } catch (error) {
       console.error('加载排行榜失败:', error);
       setPlaylists([]);
@@ -404,17 +490,15 @@ export default function MusicPage() {
   };
 
   // 加载歌单详情
-  const loadPlaylist = async (playlistId: string, playlistName: string) => {
+  const loadPlaylist = async (playlistId: string, playlistName: string, playlistSource?: MusicSource) => {
     setLoading(true);
     try {
+      const source = playlistSource || currentSource;
       const response = await fetch(
-        `/api/music?action=toplist&platform=${currentSource}&id=${playlistId}`
+        `/api/music/v2/discovery/board-songs?source=${source}&boardId=${playlistId}`
       );
-      let data = await response.json();
-      // 执行前端 transform（如果有）
-      data = executeTransform(data);
-      // 确保返回的是数组
-      setSongs(Array.isArray(data) ? data : []);
+      const data = await response.json();
+      setSongs((data.data?.list || []).map(mapSong));
       setCurrentPlaylistTitle(playlistName);
       setCurrentView('songs');
     } catch (error) {
@@ -432,13 +516,10 @@ export default function MusicPage() {
     setLoading(true);
     try {
       const response = await fetch(
-        `/api/music?action=search&platform=${currentSource}&keyword=${encodeURIComponent(searchKeyword)}&page=1&pageSize=20`
+        `/api/music/v2/search?source=${currentSource}&q=${encodeURIComponent(searchKeyword)}&page=1&limit=20`
       );
-      let data = await response.json();
-      // 执行前端 transform（如果有）
-      data = executeTransform(data);
-      // 确保返回的是数组
-      setSongs(Array.isArray(data) ? data : []);
+      const data = await response.json();
+      setSongs((data.data?.list || []).map(mapSong));
       setCurrentPlaylistTitle(`搜索: ${searchKeyword}`);
       setCurrentView('songs');
     } catch (error) {
@@ -460,10 +541,10 @@ export default function MusicPage() {
   const loadUserPlaylists = async () => {
     try {
       setLoadingUserPlaylists(true);
-      const response = await fetch('/api/music/playlists');
+      const response = await fetch('/api/music/v2/playlists');
       if (response.ok) {
         const data = await response.json();
-        setUserPlaylists(data.playlists || []);
+        setUserPlaylists(data.data?.playlists || []);
       }
     } catch (error) {
       console.error('加载歌单失败:', error);
@@ -476,10 +557,16 @@ export default function MusicPage() {
   const loadUserPlaylistSongs = async (playlistId: string) => {
     try {
       setLoadingUserPlaylistSongs(true);
-      const response = await fetch(`/api/music/playlists/songs?playlistId=${playlistId}`);
+      const response = await fetch(`/api/music/v2/playlists/${playlistId}/songs`);
       if (response.ok) {
         const data = await response.json();
-        setUserPlaylistSongs(data.songs || []);
+        setUserPlaylistSongs((data.data?.songs || []).map((song: any) => ({
+          ...song,
+          id: song.songId,
+          platform: song.source,
+          pic: song.cover,
+          duration: song.durationSec,
+        })));
       }
     } catch (error) {
       console.error('加载歌单歌曲失败:', error);
@@ -508,7 +595,7 @@ export default function MusicPage() {
     setLoadingPlayAll(true);
     try {
       // 1. 清空所有播放历史
-      await clearAllMusicPlayRecords();
+      await fetch('/api/music/v2/history', { method: 'DELETE' });
 
       // 2. 清空本地状态
       setPlayRecords([]);
@@ -517,22 +604,25 @@ export default function MusicPage() {
       // 3. 批量添加歌单中的所有歌曲到播放历史
       const baseTime = Date.now();
       const recordsToAdd = userPlaylistSongs.map((song, i) => ({
-        key: `${song.platform}+${song.id}`,
-        record: {
-          platform: song.platform,
-          id: song.id,
+        song: {
+          songId: song.id,
+          source: song.platform,
+          songmid: song.songmid,
           name: song.name,
           artist: song.artist,
           album: song.album,
-          pic: song.pic,
-          play_time: 0,
-          duration: song.duration || 0,
-          save_time: baseTime + i, // 使用递增的时间戳
+          cover: song.pic,
+          durationSec: song.duration || 0,
+          durationText: song.durationText,
         },
+        playProgressSec: 0,
+        lastPlayedAt: baseTime + i,
+        playCount: 1,
+        lastQuality: quality,
       }));
 
       // 一次性批量添加所有歌曲
-      const response = await fetch('/api/music/playrecords', {
+      const response = await fetch('/api/music/v2/history', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -560,6 +650,9 @@ export default function MusicPage() {
         album: song.album,
         pic: song.pic,
         platform: song.platform,
+        duration: song.duration,
+        durationText: song.durationText,
+        songmid: song.songmid,
       }));
 
       setPlayRecords(newRecords);
@@ -607,9 +700,7 @@ export default function MusicPage() {
         // 然后执行删除
         setDeletingPlaylistId(playlistId);
         try {
-          const response = await fetch(`/api/music/playlists?playlistId=${playlistId}`, {
-            method: 'DELETE',
-          });
+          const response = await fetch(`/api/music/v2/playlists/${playlistId}`, { method: 'DELETE' });
 
           if (response.ok) {
             setToast({
@@ -664,7 +755,7 @@ export default function MusicPage() {
       onConfirm: async () => {
         try {
           const response = await fetch(
-            `/api/music/playlists/songs?playlistId=${selectedUserPlaylist.id}&platform=${song.platform}&songId=${song.id}`,
+            `/api/music/v2/playlists/${selectedUserPlaylist.id}/songs?songId=${encodeURIComponent(song.id)}`,
             { method: 'DELETE' }
           );
 
@@ -713,9 +804,12 @@ export default function MusicPage() {
 
   // 播放歌曲
   const playSong = async (song: Song, index: number) => {
+    beginResolving();
     try {
       // 使用歌曲自己的平台信息，如果没有则使用当前选择的平台
-      const platform = song.platform || currentSource;
+          const platform = song.platform || currentSource;
+          const proxyEnabled = getMusicProxyEnabled();
+          setMusicProxyEnabled(proxyEnabled);
 
       // 记录歌曲开始播放的时间
       songStartTimeRef.current = Date.now();
@@ -763,56 +857,61 @@ export default function MusicPage() {
         }
       });
 
-      // 调用解析接口获取播放链接
-      const response = await fetch('/api/music', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'parse',
-          platform: platform, // 使用歌曲的平台
-          ids: song.id,
-          quality: quality,
-        }),
-      });
+      if (proxyEnabled) {
+        const streamUrl = buildStreamUrl(song, platform, quality);
+        setCurrentSongUrl(streamUrl);
 
-      let data = await response.json();
-      // 执行前端 transform（如果有）
-      data = executeTransform(data);
+        if (audioRef.current) {
+          audioRef.current.src = streamUrl;
+          audioRef.current.load();
+          audioRef.current.play().catch(err => {
+            console.error('播放失败:', err);
+          });
+          setIsPlaying(true);
+        }
 
-      // TuneHub 返回格式: { code: 0, data: { data: [...] } }
-      if (data.code === 0 && data.data?.data && data.data.data.length > 0) {
-        const songData = data.data.data[0];
+        fetchPlayData(song, platform, quality, false)
+          .then((data) => {
+            if (data.success) {
+              if (data.data.song?.cover) {
+                setCurrentSong({
+                  ...song,
+                  pic: data.data.song.cover,
+                  platform,
+                });
+              }
 
-        if (songData.url && songData.success) {
-          // 处理封面图片（在 HTTPS 环境下代理 HTTP 图片）
-          const coverUrl = processImageUrl(songData.cover, platform);
-
-          // 更新歌曲信息，包括封面
-          if (coverUrl) {
+              if (data.data.lyric?.lyric) {
+                const parsedLyrics = parseLyric(data.data.lyric.lyric, data.data.lyric.tlyric);
+                setLyrics(parsedLyrics);
+              }
+            } else {
+              console.error('播放信息获取失败:', data);
+            }
+          })
+          .catch((error) => {
+            console.error('加载歌词失败:', error);
+          });
+      } else {
+        const data = await fetchPlayData(song, platform, quality, true);
+        if (data.success && data.data?.play?.directUrl) {
+          if (data.data.song?.cover) {
             setCurrentSong({
               ...song,
-              pic: coverUrl,
+              pic: data.data.song.cover,
               platform,
             });
           }
 
-          // 解析歌词
-          if (songData.lyrics) {
-            const parsedLyrics = parseLyric(songData.lyrics);
+          if (data.data.lyric?.lyric) {
+            const parsedLyrics = parseLyric(data.data.lyric.lyric, data.data.lyric.tlyric);
             setLyrics(parsedLyrics);
           }
 
-          // 保存原始 URL 用于下载
-          setCurrentSongUrl(songData.url);
-
-          // 对于酷我音乐，使用代理
-          let playUrl = songData.url;
-          if (platform === 'kuwo') {
-            playUrl = `/api/music/proxy?url=${encodeURIComponent(songData.url)}`;
-          }
+          setCurrentSongUrl(data.data.play.directUrl);
 
           if (audioRef.current) {
-            audioRef.current.src = playUrl;
+            audioRef.current.src = data.data.play.directUrl;
             audioRef.current.load();
             audioRef.current.play().catch(err => {
               console.error('播放失败:', err);
@@ -820,46 +919,59 @@ export default function MusicPage() {
             setIsPlaying(true);
           }
         } else {
-          console.error('无法获取播放链接，songData:', songData);
+          console.error('播放信息获取失败:', data);
         }
-      } else {
-        console.error('解析失败，完整响应:', data);
       }
     } catch (error) {
       console.error('播放失败:', error);
+    } finally {
+      endResolving();
     }
   };
 
   // 解析歌词文本
-  const parseLyric = (lyricText: string): LyricLine[] => {
-    if (!lyricText) return [];
-
-    const lines = lyricText.split('\n');
-    const lyricLines: LyricLine[] = [];
+  const parseLyric = (lyricText: string, tlyricText?: string): LyricLine[] => {
+    if (!lyricText && !tlyricText) return [];
 
     // 匹配 [mm:ss.xx] 或 [mm:ss] 格式
     const timeRegex = /\[(\d{2}):(\d{2})(?:\.(\d{2,3}))?\]/g;
+    const parseLyricText = (text: string) => {
+      const parsed = new Map<number, string>();
+      const lines = text.split('\n');
 
-    lines.forEach(line => {
-      const matches = Array.from(line.matchAll(timeRegex));
-      if (matches.length > 0) {
-        // 提取歌词文本（去掉所有时间标签）
-        const text = line.replace(timeRegex, '').trim();
-        if (text) {
-          // 一行可能有多个时间标签
-          matches.forEach(match => {
-            const minutes = parseInt(match[1]);
-            const seconds = parseInt(match[2]);
-            const milliseconds = match[3] ? parseInt(match[3].padEnd(3, '0')) : 0;
-            const time = minutes * 60 + seconds + milliseconds / 1000;
-            lyricLines.push({ time, text });
-          });
+      lines.forEach(line => {
+        const matches = Array.from(line.matchAll(timeRegex));
+        if (matches.length > 0) {
+          const content = line.replace(timeRegex, '').trim();
+          if (content) {
+            matches.forEach(match => {
+              const minutes = parseInt(match[1]);
+              const seconds = parseInt(match[2]);
+              const milliseconds = match[3] ? parseInt(match[3].padEnd(3, '0')) : 0;
+              const time = minutes * 60 + seconds + milliseconds / 1000;
+              parsed.set(time, content);
+            });
+          }
         }
-      }
-    });
+      });
 
-    // 按时间排序
-    return lyricLines.sort((a, b) => a.time - b.time);
+      return parsed;
+    };
+
+    const mainMap = parseLyricText(lyricText || '');
+    const transMap = parseLyricText(tlyricText || '');
+    const times = Array.from(new Set([
+      ...Array.from(mainMap.keys()),
+      ...Array.from(transMap.keys()),
+    ])).sort((a, b) => a - b);
+
+    return times
+      .map(time => ({
+        time,
+        text: mainMap.get(time) || '',
+        translation: transMap.get(time) || undefined,
+      }))
+      .filter(line => line.text || line.translation);
   };
 
   // 切换播放/暂停
@@ -879,19 +991,7 @@ export default function MusicPage() {
         // 保存到数据库
         if (currentSong && playlistIndex >= 0 && playRecords[playlistIndex]) {
           const record = playRecords[playlistIndex];
-          const dbRecord: MusicPlayRecord = {
-            platform: record.platform,
-            id: record.id,
-            name: currentSong.name,
-            artist: currentSong.artist,
-            album: currentSong.album,
-            pic: currentSong.pic,
-            play_time: audioRef.current.currentTime,
-            duration: audioRef.current.duration || 0,
-            save_time: Date.now(),
-          };
-
-          saveMusicPlayRecord(record.platform, record.id, dbRecord).catch(err => {
+          saveHistoryRecord(record, currentSong, audioRef.current.currentTime, audioRef.current.duration || 0).catch(err => {
             console.error('暂停时保存播放记录失败:', err);
           });
         }
@@ -974,7 +1074,7 @@ export default function MusicPage() {
   };
 
   // 切换平台
-  const switchSource = (source: 'netease' | 'qq' | 'kuwo') => {
+  const switchSource = (source: MusicSource) => {
     setCurrentSource(source);
     setCurrentView('playlists');
     setSongs([]);
@@ -1024,19 +1124,7 @@ export default function MusicPage() {
 
               // 保存到数据库
               const record = updated[playlistIndex];
-              const dbRecord: MusicPlayRecord = {
-                platform: record.platform,
-                id: record.id,
-                name: currentSong.name,
-                artist: currentSong.artist,
-                album: currentSong.album,
-                pic: currentSong.pic,
-                play_time: audio.currentTime,
-                duration: audio.duration || 0,
-                save_time: Date.now(),
-              };
-
-              saveMusicPlayRecord(record.platform, record.id, dbRecord).catch(err => {
+              saveHistoryRecord(record, currentSong, audio.currentTime, audio.duration || 0).catch(err => {
                 console.error('保存播放记录到数据库失败:', err);
               });
             }
@@ -1076,19 +1164,7 @@ export default function MusicPage() {
 
             // 保存到数据库（包含时长信息）
             const record = updated[playlistIndex];
-            const dbRecord: MusicPlayRecord = {
-              platform: record.platform,
-              id: record.id,
-              name: currentSong.name,
-              artist: currentSong.artist,
-              album: currentSong.album,
-              pic: currentSong.pic,
-              play_time: record.playTime,
-              duration: audio.duration,
-              save_time: Date.now(),
-            };
-
-            saveMusicPlayRecord(record.platform, record.id, dbRecord).catch(err => {
+            saveHistoryRecord(record, currentSong, record.playTime, audio.duration).catch(err => {
               console.error('保存播放记录到数据库失败:', err);
             });
           }
@@ -1260,9 +1336,11 @@ export default function MusicPage() {
 
   const getSourceLabel = () => {
     switch (currentSource) {
-      case 'netease': return '网易云';
-      case 'qq': return 'QQ音乐';
-      case 'kuwo': return '酷我';
+      case 'wy': return '网易云';
+      case 'tx': return 'QQ音乐';
+      case 'kw': return '酷我';
+      case 'kg': return '酷狗';
+      case 'mg': return '咪咕';
     }
   };
 
@@ -1276,6 +1354,18 @@ export default function MusicPage() {
   return (
     <div className="min-h-screen bg-zinc-950 text-white">
       <>
+      {resolvingCount > 0 && (
+        <div className="fixed top-4 right-4 z-[80] pointer-events-none">
+          <div className="relative w-16 h-16 md:w-20 md:h-20">
+            <div className="absolute inset-0 rounded-full border-4 border-white/10" />
+            <div className="absolute inset-0 rounded-full border-4 border-transparent border-t-green-500 border-r-emerald-400 animate-spin shadow-[0_0_20px_rgba(34,197,94,0.35)]" />
+            <div className="absolute inset-1 rounded-full bg-zinc-950/90 backdrop-blur-md border border-white/10 flex flex-col items-center justify-center">
+              <div className="text-[10px] md:text-xs text-zinc-400 leading-none mb-1">解析中</div>
+              <div className="text-lg md:text-xl font-bold text-white leading-none">{resolvingCount}</div>
+            </div>
+          </div>
+        </div>
+      )}
       {/* Header */}
       <header className="fixed top-0 left-0 right-0 z-40 bg-zinc-950/95 backdrop-blur-md border-b border-white/10 px-4 md:px-6">
         <div className="w-full mx-auto flex flex-col md:flex-row md:items-center md:justify-between gap-3 md:gap-4 py-3">
@@ -1297,37 +1387,47 @@ export default function MusicPage() {
               </div>
               <span className="font-bold text-lg text-white">音乐</span>
             </div>
-            <div className="flex bg-white/5 rounded-lg p-1 gap-1 border border-white/5">
+            <div className="md:hidden relative">
               <button
-                onClick={() => switchSource('netease')}
-                className={`px-3 py-1 md:px-4 rounded text-[10px] font-bold tracking-wider transition-all ${
-                  currentSource === 'netease'
-                    ? 'bg-green-500 text-white border border-white/30 shadow-lg shadow-green-500/50'
-                    : 'text-zinc-400 border border-transparent'
-                }`}
+                onClick={() => setShowSourceMenu(true)}
+                className="relative h-10 min-w-[132px] rounded-full border border-white/10 bg-gradient-to-r from-white/8 to-white/4 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] px-3"
               >
-                NET
+                <div className="absolute inset-0 flex items-center justify-between px-3">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="w-6 h-6 rounded-full bg-green-500/15 text-green-400 flex items-center justify-center shrink-0">
+                      <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
+                        <path d="M18 3a1 1 0 00-1.196-.98l-10 2A1 1 0 006 5v9.114A4.369 4.369 0 005 14c-1.657 0-3 .895-3 2s1.343 2 3 2 3-.895 3-2V7.82l8-1.6v5.894A4.37 4.37 0 0015 12c-1.657 0-3 .895-3 2s1.343 2 3 2 3-.895 3-2V3z" />
+                      </svg>
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-[9px] uppercase tracking-[0.18em] text-zinc-500 leading-none">音源</div>
+                      <div className="text-sm font-medium text-white leading-tight truncate">
+                        {musicSources.find((source) => source.key === currentSource)?.label || '酷我'}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="w-7 h-7 rounded-full bg-white/6 border border-white/8 flex items-center justify-center text-zinc-300 shrink-0">
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </div>
+                </div>
               </button>
-              <button
-                onClick={() => switchSource('qq')}
-                className={`px-3 py-1 md:px-4 rounded text-[10px] font-bold tracking-wider transition-all ${
-                  currentSource === 'qq'
-                    ? 'bg-green-500 text-white border border-white/30 shadow-lg shadow-green-500/50'
-                    : 'text-zinc-400 border border-transparent'
-                }`}
-              >
-                QQ
-              </button>
-              <button
-                onClick={() => switchSource('kuwo')}
-                className={`px-3 py-1 md:px-4 rounded text-[10px] font-bold tracking-wider transition-all ${
-                  currentSource === 'kuwo'
-                    ? 'bg-green-500 text-white border border-white/30 shadow-lg shadow-green-500/50'
-                    : 'text-zinc-400 border border-transparent'
-                }`}
-              >
-                酷我
-              </button>
+            </div>
+            <div className="hidden md:flex flex-wrap bg-white/5 rounded-lg p-1 gap-1 border border-white/5">
+              {musicSources.map((source) => (
+                <button
+                  key={source.key}
+                  onClick={() => switchSource(source.key)}
+                  className={`px-3 py-1 md:px-4 rounded text-[10px] font-bold tracking-wider transition-all ${
+                    currentSource === source.key
+                      ? 'bg-green-500 text-white border border-white/30 shadow-lg shadow-green-500/50'
+                      : 'text-zinc-400 border border-transparent'
+                  }`}
+                >
+                  {source.label}
+                </button>
+              ))}
             </div>
           </div>
           <div className="flex items-center w-full md:flex-1 md:max-w-md md:ml-auto h-10 md:h-9 gap-2">
@@ -1385,34 +1485,41 @@ export default function MusicPage() {
                   {getSourceLabel()}
                 </span>
               </div>
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
-                {playlists.map((playlist) => (
-                  <div
-                    key={playlist.id}
-                    onClick={() => loadPlaylist(playlist.id, playlist.name)}
-                    className="cursor-pointer group"
-                  >
-                    <div className="relative aspect-square rounded-lg overflow-hidden mb-2 bg-white/5">
-                      {playlist.pic && (
-                        <img
-                          src={playlist.pic}
-                          alt={playlist.name}
-                          className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300"
-                        />
-                      )}
-                      <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                        <svg className="w-12 h-12 text-white" fill="currentColor" viewBox="0 0 20 20">
-                          <path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z" />
-                        </svg>
+              {playlists.length > 0 ? (
+                <div className="space-y-2">
+                  {playlists.map((playlist, index) => (
+                    <button
+                      key={playlist.id}
+                      onClick={() => loadPlaylist(playlist.id, playlist.name, playlist.source)}
+                      className="w-full text-left rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 transition-colors px-4 py-3"
+                    >
+                      <div className="flex items-center gap-4">
+                        <div className="w-8 text-sm text-zinc-500 font-mono shrink-0">
+                          {String(index + 1).padStart(2, '0')}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm font-medium text-white/90 truncate">{playlist.name}</div>
+                          {playlist.updateFrequency ? (
+                            <div className="text-xs text-zinc-500 mt-1 truncate">{playlist.updateFrequency}</div>
+                          ) : null}
+                        </div>
+                        <div className="text-zinc-500 shrink-0">
+                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
+                          </svg>
+                        </div>
                       </div>
-                    </div>
-                    <h3 className="text-sm font-medium text-white/80 truncate">{playlist.name}</h3>
-                    {playlist.updateFrequency && (
-                      <p className="text-xs text-zinc-500 mt-1">{playlist.updateFrequency}</p>
-                    )}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="rounded-xl border border-white/10 bg-white/5 p-6 text-center text-zinc-400">
+                  <div className="text-base font-medium text-white/80 mb-2">当前音源暂无排行榜</div>
+                  <div className="text-sm text-zinc-500">
+                    你可以切换其它音源，或使用上方搜索继续找歌。
                   </div>
-                ))}
-              </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -1868,7 +1975,18 @@ export default function MusicPage() {
                           : 'text-zinc-600 text-sm'
                       }`}
                     >
-                      {line.text}
+                      <div>{line.text}</div>
+                      {line.translation && (
+                        <div
+                          className={`mt-1 ${
+                            index === currentLyricIndex
+                              ? 'text-zinc-300 text-sm md:text-base font-normal'
+                              : 'text-zinc-500 text-xs md:text-sm font-normal'
+                          }`}
+                        >
+                          {line.translation}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -2084,7 +2202,7 @@ export default function MusicPage() {
                     onClick={async () => {
                       if (confirm('确定要清空全部播放记录吗？')) {
                         try {
-                          await clearAllMusicPlayRecords();
+                          await fetch('/api/music/v2/history', { method: 'DELETE' });
                           setPlaylist([]);
                           setPlayRecords([]);
                           setPlaylistIndex(-1);
@@ -2168,8 +2286,7 @@ export default function MusicPage() {
                         onClick={async (e) => {
                           e.stopPropagation();
                           try {
-                            const platform = song.platform || 'netease';
-                            await deleteMusicPlayRecord(platform, song.id);
+                            await fetch(`/api/music/v2/history?songId=${encodeURIComponent(song.id)}`, { method: 'DELETE' });
 
                             // 更新本地状态
                             const newPlaylist = playlist.filter((_, i) => i !== index);
@@ -2337,6 +2454,61 @@ export default function MusicPage() {
               >
                 取消
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showSourceMenu && (
+        <div className="md:hidden fixed inset-0 z-[90]">
+          <button
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            onClick={() => setShowSourceMenu(false)}
+            aria-label="关闭音源菜单"
+          />
+          <div className="absolute inset-x-0 bottom-0 rounded-t-3xl border-t border-white/10 bg-zinc-950/98 px-4 pb-6 pt-4 shadow-2xl">
+            <div className="mx-auto mb-4 h-1.5 w-12 rounded-full bg-white/15" />
+            <div className="mb-3 px-1 text-sm font-medium text-white">切换音源</div>
+            <div className="space-y-2">
+              {musicSources.map((source) => {
+                const active = currentSource === source.key;
+                return (
+                  <button
+                    key={source.key}
+                    onClick={() => {
+                      setShowSourceMenu(false);
+                      if (!active) switchSource(source.key);
+                    }}
+                    className={`flex w-full items-center justify-between rounded-2xl border px-4 py-3 text-left transition-all ${
+                      active
+                        ? 'border-green-500/50 bg-green-500/12 text-white'
+                        : 'border-white/8 bg-white/5 text-zinc-200'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className={`flex h-9 w-9 items-center justify-center rounded-full ${active ? 'bg-green-500/20 text-green-400' : 'bg-white/8 text-zinc-400'}`}>
+                        <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                          <path d="M18 3a1 1 0 00-1.196-.98l-10 2A1 1 0 006 5v9.114A4.369 4.369 0 005 14c-1.657 0-3 .895-3 2s1.343 2 3 2 3-.895 3-2V7.82l8-1.6v5.894A4.37 4.37 0 0015 12c-1.657 0-3 .895-3 2s1.343 2 3 2 3-.895 3-2V3z" />
+                        </svg>
+                      </div>
+                      <div className="text-base font-medium">{source.label}</div>
+                    </div>
+                    {active ? (
+                      <div className="flex h-6 w-6 items-center justify-center rounded-full bg-green-500 text-white">
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7" />
+                        </svg>
+                      </div>
+                    ) : (
+                      <div className="text-zinc-500">
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
+                        </svg>
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
             </div>
           </div>
         </div>

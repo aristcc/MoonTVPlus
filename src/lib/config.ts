@@ -4,6 +4,8 @@ import { db } from '@/lib/db';
 
 import { AdminConfig } from './admin.types';
 
+const BUILTIN_DANMAKU_API_BASE = 'https://mtvpls-danmu.netlify.app/87654321';
+
 export interface ApiSite {
   key: string;
   api: string;
@@ -223,6 +225,9 @@ async function getInitConfig(configFile: string, subConfig: {
   } catch (e) {
     cfgFile = {} as ConfigFileStruct;
   }
+  const hasCustomDanmakuEnv = Boolean(
+    process.env.DANMAKU_API_BASE || process.env.DANMAKU_API_TOKEN
+  );
   const adminConfig: AdminConfig = {
     ConfigFile: configSource,
     ConfigSubscribtion: subConfig,
@@ -245,8 +250,12 @@ async function getInitConfig(configFile: string, subConfig: {
       FluidSearch:
         process.env.NEXT_PUBLIC_FLUID_SEARCH !== 'false',
       // 弹幕配置
-      DanmakuApiBase: process.env.DANMAKU_API_BASE || 'http://localhost:9321',
+      DanmakuSourceType: hasCustomDanmakuEnv ? 'custom' : 'builtin',
+      DanmakuApiBase:
+        process.env.DANMAKU_API_BASE ||
+        (hasCustomDanmakuEnv ? 'http://localhost:9321' : BUILTIN_DANMAKU_API_BASE),
       DanmakuApiToken: process.env.DANMAKU_API_TOKEN || '87654321',
+      DanmakuAutoLoadDefault: true,
       // TMDB配置
       TMDBApiKey: process.env.TMDB_API_KEY || '',
       TMDBProxy: process.env.TMDB_PROXY || '',
@@ -256,8 +265,21 @@ async function getInitConfig(configFile: string, subConfig: {
       PansouUsername: '',
       PansouPassword: '',
       PansouKeywordBlocklist: '',
+      // 磁链配置
+      MagnetProxy: '',
+      MagnetMikanReverseProxy: '',
+      MagnetDmhyReverseProxy: '',
+      MagnetAcgripReverseProxy: '',
       // 评论功能开关
       EnableComments: false,
+      EnableRegistration: false,
+      RequireRegistrationInviteCode: false,
+      RegistrationInviteCode: '',
+      RegistrationRequireTurnstile: false,
+      LoginRequireTurnstile: false,
+      TurnstileSiteKey: '',
+      TurnstileSecretKey: '',
+      DefaultUserTags: [],
     },
     UserConfig: {
       Users: [],
@@ -426,28 +448,87 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
       DoubanImageProxy: '',
       DisableYellowFilter: false,
       FluidSearch: true,
-      DanmakuApiBase: 'http://localhost:9321',
+      DanmakuSourceType: 'builtin',
+      DanmakuApiBase: BUILTIN_DANMAKU_API_BASE,
       DanmakuApiToken: '87654321',
+      DanmakuAutoLoadDefault: true,
       PansouApiUrl: '',
       PansouUsername: '',
       PansouPassword: '',
       PansouKeywordBlocklist: '',
+      MagnetProxy: '',
+      MagnetMikanReverseProxy: '',
+      MagnetDmhyReverseProxy: '',
+      MagnetAcgripReverseProxy: '',
       EnableComments: false,
+      EnableRegistration: false,
+      RequireRegistrationInviteCode: false,
+      RegistrationInviteCode: '',
+      RegistrationRequireTurnstile: false,
+      LoginRequireTurnstile: false,
+      TurnstileSiteKey: '',
+      TurnstileSecretKey: '',
+      DefaultUserTags: [],
     };
   }
   // 确保弹幕配置存在
+  if (adminConfig.SiteConfig.DanmakuSourceType === undefined) {
+    adminConfig.SiteConfig.DanmakuSourceType = 'custom';
+  }
   if (!adminConfig.SiteConfig.DanmakuApiBase) {
-    adminConfig.SiteConfig.DanmakuApiBase = 'http://localhost:9321';
+    adminConfig.SiteConfig.DanmakuApiBase =
+      adminConfig.SiteConfig.DanmakuSourceType === 'builtin'
+        ? BUILTIN_DANMAKU_API_BASE
+        : 'http://localhost:9321';
   }
   if (!adminConfig.SiteConfig.DanmakuApiToken) {
     adminConfig.SiteConfig.DanmakuApiToken = '87654321';
+  }
+  if (adminConfig.SiteConfig.DanmakuAutoLoadDefault === undefined) {
+    adminConfig.SiteConfig.DanmakuAutoLoadDefault = true;
   }
   // 确保评论开关存在
   if (adminConfig.SiteConfig.EnableComments === undefined) {
     adminConfig.SiteConfig.EnableComments = false;
   }
+  if (adminConfig.SiteConfig.EnableRegistration === undefined) {
+    adminConfig.SiteConfig.EnableRegistration = false;
+  }
+  if (adminConfig.SiteConfig.RequireRegistrationInviteCode === undefined) {
+    adminConfig.SiteConfig.RequireRegistrationInviteCode = false;
+  }
+  if (adminConfig.SiteConfig.RegistrationInviteCode === undefined) {
+    adminConfig.SiteConfig.RegistrationInviteCode = '';
+  }
+  if (adminConfig.SiteConfig.RegistrationRequireTurnstile === undefined) {
+    adminConfig.SiteConfig.RegistrationRequireTurnstile = false;
+  }
+  if (adminConfig.SiteConfig.LoginRequireTurnstile === undefined) {
+    adminConfig.SiteConfig.LoginRequireTurnstile = false;
+  }
+  if (adminConfig.SiteConfig.TurnstileSiteKey === undefined) {
+    adminConfig.SiteConfig.TurnstileSiteKey = '';
+  }
+  if (adminConfig.SiteConfig.TurnstileSecretKey === undefined) {
+    adminConfig.SiteConfig.TurnstileSecretKey = '';
+  }
+  if (adminConfig.SiteConfig.DefaultUserTags === undefined) {
+    adminConfig.SiteConfig.DefaultUserTags = [];
+  }
   if (adminConfig.SiteConfig.PansouKeywordBlocklist === undefined) {
     adminConfig.SiteConfig.PansouKeywordBlocklist = '';
+  }
+  if (adminConfig.SiteConfig.MagnetProxy === undefined) {
+    adminConfig.SiteConfig.MagnetProxy = '';
+  }
+  if (adminConfig.SiteConfig.MagnetMikanReverseProxy === undefined) {
+    adminConfig.SiteConfig.MagnetMikanReverseProxy = '';
+  }
+  if (adminConfig.SiteConfig.MagnetDmhyReverseProxy === undefined) {
+    adminConfig.SiteConfig.MagnetDmhyReverseProxy = '';
+  }
+  if (adminConfig.SiteConfig.MagnetAcgripReverseProxy === undefined) {
+    adminConfig.SiteConfig.MagnetAcgripReverseProxy = '';
   }
   if (!adminConfig.UserConfig) {
     adminConfig.UserConfig = { Users: [] };
@@ -542,19 +623,78 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
     }
   }
 
+  if (!adminConfig.SuwayomiConfig) {
+    adminConfig.SuwayomiConfig = {
+      Enabled: process.env.SUWAYOMI_ENABLED === 'true',
+      ServerURL: process.env.SUWAYOMI_URL || process.env.NEXT_PUBLIC_SUWAYOMI_URL || '',
+      AuthMode: (process.env.SUWAYOMI_AUTH_MODE as 'none' | 'basic_auth' | 'simple_login' | undefined) || 'none',
+      Username: process.env.SUWAYOMI_USERNAME || '',
+      Password: process.env.SUWAYOMI_PASSWORD || '',
+      DefaultLang: process.env.SUWAYOMI_DEFAULT_LANG || 'zh',
+      SourceIds: [],
+      MaxSources: Number(process.env.SUWAYOMI_MAX_SOURCES || 10),
+    };
+  }
+  if (adminConfig.SuwayomiConfig.Enabled === undefined) {
+    adminConfig.SuwayomiConfig.Enabled = false;
+  }
+  if (adminConfig.SuwayomiConfig.ServerURL === undefined) {
+    adminConfig.SuwayomiConfig.ServerURL = '';
+  }
+  if (
+    adminConfig.SuwayomiConfig.AuthMode !== 'basic_auth' &&
+    adminConfig.SuwayomiConfig.AuthMode !== 'simple_login'
+  ) {
+    adminConfig.SuwayomiConfig.AuthMode = 'none';
+  }
+  if (adminConfig.SuwayomiConfig.Username === undefined) {
+    adminConfig.SuwayomiConfig.Username = '';
+  }
+  if (adminConfig.SuwayomiConfig.Password === undefined) {
+    adminConfig.SuwayomiConfig.Password = '';
+  }
+  if (adminConfig.SuwayomiConfig.DefaultLang === undefined) {
+    adminConfig.SuwayomiConfig.DefaultLang = 'zh';
+  }
+  if (!Array.isArray(adminConfig.SuwayomiConfig.SourceIds)) {
+    adminConfig.SuwayomiConfig.SourceIds = [];
+  }
+  if (adminConfig.SuwayomiConfig.MaxSources === undefined || Number.isNaN(adminConfig.SuwayomiConfig.MaxSources)) {
+    adminConfig.SuwayomiConfig.MaxSources = 10;
+  }
+
+  if (!adminConfig.NetDiskConfig) {
+    adminConfig.NetDiskConfig = {
+      Quark: {
+        Enabled: false,
+        Cookie: '',
+        SavePath: '/',
+        PlayTempSavePath: '/',
+        OpenListTempPath: '/',
+      },
+    };
+  }
+
+  if (!adminConfig.NetDiskConfig.Quark) {
+    adminConfig.NetDiskConfig.Quark = {
+      Enabled: false,
+      Cookie: '',
+      SavePath: '/',
+      PlayTempSavePath: '/',
+      OpenListTempPath: '/',
+    };
+  }
+
   // 确保音乐配置存在
   if (!adminConfig.MusicConfig) {
     adminConfig.MusicConfig = {
-      TuneHubEnabled: false,
-      TuneHubBaseUrl: 'https://tunehub.sayqz.com/api',
-      TuneHubApiKey: '',
-      OpenListCacheEnabled: false,
-      OpenListCacheURL: '',
-      OpenListCacheUsername: '',
-      OpenListCachePassword: '',
-      OpenListCachePath: '/music-cache',
-      OpenListCacheProxyEnabled: true,
+      Enabled: false,
+      BaseUrl: '',
+      Token: '',
+      ProxyEnabled: true,
     };
+  } else if (adminConfig.MusicConfig.ProxyEnabled === undefined) {
+    adminConfig.MusicConfig.ProxyEnabled = true;
   }
 
   return adminConfig;

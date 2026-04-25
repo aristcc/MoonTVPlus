@@ -1,4 +1,5 @@
 import { AdminConfig } from './admin.types';
+import { MangaReadRecord, MangaShelfItem } from './manga.types';
 
 // 播放记录数据结构
 export interface PlayRecord {
@@ -74,6 +75,19 @@ export interface IStorage {
   getSearchHistory(userName: string): Promise<string[]>;
   addSearchHistory(userName: string, keyword: string): Promise<void>;
   deleteSearchHistory(userName: string, keyword?: string): Promise<void>;
+
+  // 漫画书架相关
+  getMangaShelf(userName: string, key: string): Promise<MangaShelfItem | null>;
+  setMangaShelf(userName: string, key: string, item: MangaShelfItem): Promise<void>;
+  getAllMangaShelf(userName: string): Promise<{ [key: string]: MangaShelfItem }>;
+  deleteMangaShelf(userName: string, key: string): Promise<void>;
+
+  // 漫画阅读历史相关
+  getMangaReadRecord(userName: string, key: string): Promise<MangaReadRecord | null>;
+  setMangaReadRecord(userName: string, key: string, record: MangaReadRecord): Promise<void>;
+  getAllMangaReadRecords(userName: string): Promise<{ [key: string]: MangaReadRecord }>;
+  deleteMangaReadRecord(userName: string, key: string): Promise<void>;
+  cleanupOldMangaReadRecords?(userName: string): Promise<void>;
 
   // 用户列表
   getAllUsers(): Promise<string[]>;
@@ -177,6 +191,7 @@ export interface SearchResult {
   episodes_titles: string[];
   source: string;
   source_name: string;
+  weight?: number; // 播放源权重（来自后台配置，用于排序和优选评分）
   class?: string;
   year: string;
   desc?: string;
@@ -238,11 +253,13 @@ export interface EpisodeFilterRule {
 // 集数过滤配置数据结构
 export interface EpisodeFilterConfig {
   rules: EpisodeFilterRule[]; // 过滤规则列表
+  reverseMode?: boolean; // 反向模式：开启后仅显示符合规则的集数
 }
 
 // 通知类型枚举
 export type NotificationType =
   | 'favorite_update' // 收藏更新
+  | 'manga_update' // 漫画更新
   | 'system' // 系统通知
   | 'announcement' // 公告
   | 'movie_request' // 新求片通知（给管理员）
