@@ -1,0 +1,104 @@
+name: Sync upstream PR
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream-pr
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM_REPO: mtvpls/MoonTVPlus
+      UPSTREAM_BRANCH: main
+      SYNC_BRANCH: sync/upstream-main
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Prepare update branch
+        id: prep
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || true
+          git fetch origin main
+          git fetch upstream "${UPSTREAM_BRANCH}"
+
+          upstream_sha="$(git rev-parse "upstream/${UPSTREAM_BRANCH}")"
+          upstream_short="$(git rev-parse --short "upstream/${UPSTREAM_BRANCH}")"
+          echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
+          echo "upstream_short=${upstream_short}" >> "$GITHUB_OUTPUT"
+
+          if git diff --quiet HEAD "upstream/${UPSTREAM_BRANCH}" -- . ':!.github/workflows/**'; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git checkout -B "${SYNC_BRANCH}"
+
+          while IFS= read -r -d '' path; do
+            git checkout "upstream/${UPSTREAM_BRANCH}" -- "${path}"
+          done < <(git diff --name-only -z --diff-filter=ACMRT HEAD "upstream/${UPSTREAM_BRANCH}" -- . ':!.github/workflows/**')
+
+          while IFS= read -r -d '' path; do
+            git rm -f -- "${path}"
+          done < <(git diff --name-only -z --diff-filter=D HEAD "upstream/${UPSTREAM_BRANCH}" -- . ':!.github/workflows/**')
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "Sync MoonTVPlus to upstream ${upstream_short}"
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+
+      - name: Push update branch
+        if: steps.prep.outputs.has_changes == 'true'
+        run: git push --force-with-lease origin "${SYNC_BRANCH}"
+
+      - name: Open or update pull request
+        if: steps.prep.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+
+          title="Sync upstream MoonTVPlus to ${{ steps.prep.outputs.upstream_short }}"
+          body="$(cat <<'EOF'
+          Automated sync from `mtvpls/MoonTVPlus:main`.
+
+          Upstream commit: `${{ steps.prep.outputs.upstream_sha }}`
+
+          This workflow keeps this fork's `.github/workflows` files unchanged so it can run with the default GitHub Actions token. Review and merge this PR to trigger the Vercel deployment.
+          EOF
+          )"
+
+          existing="$(gh pr list \
+            --base main \
+            --head "${GITHUB_REPOSITORY_OWNER}:${SYNC_BRANCH}" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [ -n "${existing}" ]; then
+            gh pr edit "${existing}" --title "${title}" --body "${body}"
+          else
+            gh pr create --base main --head "${SYNC_BRANCH}" --title "${title}" --body "${body}"
+          fi
