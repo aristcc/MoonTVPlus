@@ -80,6 +80,32 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: '备份文件格式无效' }, { status: 400 });
     }
 
+    const importUsernames = Object.keys(importData.data.userData || {});
+    const backupHasMangaData = importUsernames.some((name) => Object.prototype.hasOwnProperty.call(importData.data.userData?.[name] || {}, 'mangaData'));
+    const backupHasBookData = importUsernames.some((name) => Object.prototype.hasOwnProperty.call(importData.data.userData?.[name] || {}, 'bookData'));
+    const preserveMangaData = !backupHasMangaData;
+    const preserveBookData = !backupHasBookData;
+
+    const preservedMangaData = preserveMangaData
+      ? Object.fromEntries(await Promise.all(importUsernames.map(async (name) => ([
+          name,
+          {
+            mangaShelf: await db.getAllMangaShelf(name),
+            mangaReadRecords: await db.getAllMangaReadRecords(name),
+          },
+        ]))))
+      : {};
+
+    const preservedBookData = preserveBookData
+      ? Object.fromEntries(await Promise.all(importUsernames.map(async (name) => ([
+          name,
+          {
+            bookShelf: await db.getAllBookShelf(name),
+            bookReadRecords: await db.getAllBookReadRecords(name),
+          },
+        ]))))
+      : {};
+
     // 开始导入数据 - 先清空现有数据
     updateProgress(username, 'import', 'clearing', 0, 1, '正在清空现有数据...');
     await db.clearAllData();
@@ -154,8 +180,8 @@ export async function POST(req: NextRequest) {
             const createdAt = userV2?.created_at || Date.now();
 
             // 根据存储类型使用不同的导入方法
-            if (storageType === 'd1') {
-              // D1 存储：使用 createUserWithHashedPassword 方法
+            if (storageType === 'd1' || storageType === 'turso') {
+              // D1/Turso 存储：使用 createUserWithHashedPassword 方法
               if (typeof storage.createUserWithHashedPassword === 'function') {
                 await storage.createUserWithHashedPassword(
                   username,
@@ -167,9 +193,9 @@ export async function POST(req: NextRequest) {
                   userV2?.enabledApis,
                   userV2?.banned
                 );
-                console.log(`用户 ${username} 导入成功 (D1)`);
+                console.log(`用户 ${username} 导入成功 (${storageType})`);
               } else {
-                console.error(`D1 storage 缺少 createUserWithHashedPassword 方法`);
+                console.error(`${storageType} storage 缺少 createUserWithHashedPassword 方法`);
                 return false;
               }
             } else if (storageType === 'postgres') {
@@ -371,6 +397,46 @@ export async function POST(req: NextRequest) {
                   }
                 }
               }
+            })(),
+
+            // 导入漫画书架 / 阅读记录
+            (async () => {
+              if (!backupHasMangaData) return;
+              const mangaShelfEntries = Object.entries((user.mangaData?.shelf || preservedMangaData[username]?.mangaShelf || {}));
+              for (let j = 0; j < mangaShelfEntries.length; j += DATA_BATCH_SIZE) {
+                const batch = mangaShelfEntries.slice(j, j + DATA_BATCH_SIZE);
+                await Promise.all(
+                  batch.map(([, item]: [string, any]) => db.saveMangaShelf(username, item.sourceId, item.mangaId, item))
+                );
+              }
+
+              const mangaReadEntries = Object.entries((user.mangaData?.readRecords || preservedMangaData[username]?.mangaReadRecords || {}));
+              for (let j = 0; j < mangaReadEntries.length; j += DATA_BATCH_SIZE) {
+                const batch = mangaReadEntries.slice(j, j + DATA_BATCH_SIZE);
+                await Promise.all(
+                  batch.map(([, record]: [string, any]) => db.saveMangaReadRecord(username, record.sourceId, record.mangaId, record))
+                );
+              }
+            })(),
+
+            // 导入电子书书架 / 阅读记录
+            (async () => {
+              if (!backupHasBookData) return;
+              const bookShelfEntries = Object.entries((user.bookData?.shelf || preservedBookData[username]?.bookShelf || {}));
+              for (let j = 0; j < bookShelfEntries.length; j += DATA_BATCH_SIZE) {
+                const batch = bookShelfEntries.slice(j, j + DATA_BATCH_SIZE);
+                await Promise.all(
+                  batch.map(([, item]: [string, any]) => db.saveBookShelf(username, item.sourceId, item.bookId, item))
+                );
+              }
+
+              const bookReadEntries = Object.entries((user.bookData?.readRecords || preservedBookData[username]?.bookReadRecords || {}));
+              for (let j = 0; j < bookReadEntries.length; j += DATA_BATCH_SIZE) {
+                const batch = bookReadEntries.slice(j, j + DATA_BATCH_SIZE);
+                await Promise.all(
+                  batch.map(([, record]: [string, any]) => db.saveBookReadRecord(username, record.sourceId, record.bookId, record))
+                );
+              }
             })()
           ]);
 
@@ -404,6 +470,8 @@ export async function POST(req: NextRequest) {
       message: '数据导入成功',
       importedUsers: Object.keys(userData).length,
       importedUsersV2: importData.data.usersV2?.length || 0,
+      importedMangaData: backupHasMangaData,
+      importedBookData: backupHasBookData,
       timestamp: importData.timestamp,
       serverVersion: typeof importData.serverVersion === 'string' ? importData.serverVersion : '未知版本'
     });

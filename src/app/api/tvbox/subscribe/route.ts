@@ -5,6 +5,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAvailableApiSites, getConfig } from '@/lib/config';
 import { db } from '@/lib/db';
 import { getCachedLiveChannels } from '@/lib/live';
+import { hasFeaturePermission } from '@/lib/permissions';
 
 export const runtime = 'nodejs';
 
@@ -76,7 +77,12 @@ export async function GET(request: NextRequest) {
     const apiSites = await getAvailableApiSites(username);
 
     // 获取直播源
-    const liveConfig = config.LiveConfig?.filter(live => !live.disabled) || [];
+    const canAccessLive = isGlobalToken || !username
+      ? true
+      : await hasFeaturePermission(username, 'live');
+    const liveConfig = canAccessLive
+      ? config.LiveConfig?.filter(live => !live.disabled) || []
+      : [];
 
     // 获取当前请求的 origin，用于构建代理链接
     // 优先级：SITE_BASE 环境变量 > origin 参数 > 从请求头构建

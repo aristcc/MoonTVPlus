@@ -15,7 +15,7 @@ function toHistoryRecord(input: any, previous?: MusicV2HistoryRecord): MusicV2Hi
     lastPlayedAt: Number(input.lastPlayedAt ?? input.last_played_at ?? now),
     playCount: Number(input.playCount ?? input.play_count ?? ((previous?.playCount || 0) + 1)),
     lastQuality: input.lastQuality || input.last_quality || previous?.lastQuality,
-    createdAt: Number(input.createdAt ?? input.created_at ?? previous?.createdAt ?? now),
+    createdAt: Number(previous?.createdAt ?? input.createdAt ?? input.created_at ?? now),
     updatedAt: now,
   };
 }
@@ -25,6 +25,8 @@ export async function GET(request: NextRequest) {
   if (!username) return unauthorized();
 
   try {
+    // 注意：records 按“播放队列顺序”返回（createdAt ASC），
+    // 前端再基于 lastPlayedAt 定位当前播放项。
     const records = await db.listMusicV2History(username);
     return NextResponse.json({ success: true, data: { records } });
   } catch (error) {

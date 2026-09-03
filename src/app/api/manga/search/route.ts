@@ -20,8 +20,8 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ results: [] });
     }
 
-    const results = await suwayomiClient.searchManga(q, sourceId, page);
-    return NextResponse.json({ results });
+    const result = await suwayomiClient.searchManga(q, sourceId, page);
+    return NextResponse.json(result);
   } catch (error) {
     return NextResponse.json({ error: (error as Error).message }, { status: 500 });
   }

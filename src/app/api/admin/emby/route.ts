@@ -27,7 +27,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const { action, ServerURL, ApiKey, Username, Password } = body;
+    const { action, ServerURL, ApiKey, Username, Password, embyAuthorizationHeader } = body;
 
     const authInfo = getAuthInfoFromCookie(request);
     if (!authInfo || !authInfo.username) {
@@ -64,6 +64,7 @@ export async function POST(request: NextRequest) {
         ApiKey,
         Username,
         Password,
+        embyAuthorizationHeader,
       };
 
       const client = new EmbyClient(testConfig);

@@ -1,5 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import { normalizeApiBaseUrl } from '@/lib/url';
+
 // Token 内存缓存
 const tokenCache = new Map<string, { token: string; expiresAt: number }>();
 
@@ -34,12 +36,15 @@ export interface OpenListGetResponse {
 
 export class OpenListClient {
   private token = '';
+  private baseURL: string;
 
   constructor(
-    private baseURL: string,
+    baseURL: string,
     private username: string,
     private password: string
-  ) {}
+  ) {
+    this.baseURL = normalizeApiBaseUrl(baseURL);
+  }
 
   /**
    * 使用账号密码登录获取Token
@@ -49,7 +54,8 @@ export class OpenListClient {
     username: string,
     password: string
   ): Promise<string> {
-    const response = await fetch(`${baseURL}/api/auth/login`, {
+    const normalizedBaseURL = normalizeApiBaseUrl(baseURL);
+    const response = await fetch(`${normalizedBaseURL}/api/auth/login`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

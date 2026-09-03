@@ -23,6 +23,8 @@ interface EmbySourceConfig {
   appendMediaSourceId?: boolean;
   transcodeMp4?: boolean;
   proxyPlay?: boolean; // 视频播放代理开关
+  customUserAgent?: string; // 自定义User-Agent
+  embyAuthorizationHeader?: string; // 自定义 X-Emby-Authorization 请求头
 }
 
 class EmbyManager {
@@ -62,6 +64,7 @@ class EmbyManager {
         UserId: config.EmbyConfig.UserId,
         AuthToken: config.EmbyConfig.AuthToken,
         Libraries: config.EmbyConfig.Libraries,
+        embyAuthorizationHeader: config.EmbyConfig.embyAuthorizationHeader,
         LastSyncTime: config.EmbyConfig.LastSyncTime,
         ItemCount: config.EmbyConfig.ItemCount,
         isDefault: true,
@@ -176,6 +179,7 @@ export function migrateEmbyConfig(config: AdminConfig): AdminConfig {
         UserId: oldConfig.UserId,
         AuthToken: oldConfig.AuthToken,
         Libraries: oldConfig.Libraries,
+        embyAuthorizationHeader: oldConfig.embyAuthorizationHeader,
         LastSyncTime: oldConfig.LastSyncTime,
         ItemCount: oldConfig.ItemCount,
         isDefault: true,

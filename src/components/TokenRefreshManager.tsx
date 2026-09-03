@@ -4,6 +4,7 @@ import { useEffect } from 'react';
 
 import { getAuthInfoFromBrowserCookie, clearAuthCookie } from '@/lib/auth';
 import { TOKEN_CONFIG } from '@/lib/refresh-token';
+import { isLoginPathname, resolveLoginPath } from '@/lib/tv-mode';
 
 /**
  * Token 自动刷新管理器
@@ -54,7 +55,7 @@ export function TokenRefreshManager() {
             // 刷新失败，先登出再跳转登录
             if (response.status === 401 || response.status === 403) {
               // 如果在登录页面，跳过登出和跳转逻辑
-              if (window.location.pathname === '/login') {
+              if (isLoginPathname(window.location.pathname)) {
                 console.log('[Token] On login page, skipping logout and redirect');
                 return false;
               }
@@ -69,7 +70,8 @@ export function TokenRefreshManager() {
                 // 登出失败时清除前端cookie
                 clearAuthCookie();
               }
-              window.location.href = `/login?redirect=${encodeURIComponent(window.location.pathname + window.location.search)}`;
+              const loginPath = resolveLoginPath(window.location.pathname);
+              window.location.href = `${loginPath}?redirect=${encodeURIComponent(window.location.pathname + window.location.search)}`;
             }
             return false;
           }
@@ -97,6 +99,9 @@ export function TokenRefreshManager() {
       // Refresh Token 已过期
       if (now >= authInfo.refreshExpires) {
         console.log('[Token] Refresh token expired, redirecting to login');
+        if (isLoginPathname(window.location.pathname)) {
+          return false;
+        }
         // 先登出再跳转登录
         window.fetch('/api/logout', {
           method: 'POST',
@@ -106,7 +111,8 @@ export function TokenRefreshManager() {
           // 登出失败时清除前端cookie
           clearAuthCookie();
         }).finally(() => {
-          window.location.href = `/login?redirect=${encodeURIComponent(window.location.pathname + window.location.search)}`;
+          const loginPath = resolveLoginPath(window.location.pathname);
+          window.location.href = `${loginPath}?redirect=${encodeURIComponent(window.location.pathname + window.location.search)}`;
         });
         return false;
       }
@@ -152,7 +158,7 @@ export function TokenRefreshManager() {
       // 响应拦截：401 错误时刷新 Token 并重试（仅重试一次）
       if (response.status === 401) {
         // 如果在登录页面，跳过刷新逻辑
-        if (window.location.pathname === '/login') {
+        if (isLoginPathname(window.location.pathname)) {
           console.log('[Token] On login page, skipping refresh logic');
           return response;
         }
@@ -178,7 +184,7 @@ export function TokenRefreshManager() {
                 console.error('[Token] Still 401 after refresh, redirecting to login');
 
                 // 如果在登录页面，跳过登出和跳转逻辑
-                if (window.location.pathname === '/login') {
+                if (isLoginPathname(window.location.pathname)) {
                   console.log('[Token] On login page, skipping logout and redirect');
                   return response;
                 }
@@ -193,7 +199,8 @@ export function TokenRefreshManager() {
                   // 登出失败时清除前端cookie
                   clearAuthCookie();
                 }
-                window.location.href = `/login?redirect=${encodeURIComponent(window.location.pathname + window.location.search)}`;
+                const loginPath = resolveLoginPath(window.location.pathname);
+                window.location.href = `${loginPath}?redirect=${encodeURIComponent(window.location.pathname + window.location.search)}`;
               }
             }
           } else {

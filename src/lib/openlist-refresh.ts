@@ -150,8 +150,63 @@ export async function startOpenListRefresh(clearMetaInfo = false): Promise<{ tas
   return { taskId };
 }
 
+async function loadMetaInfo(clearMetaInfo: boolean): Promise<MetaInfo> {
+  if (clearMetaInfo) {
+    return {
+      folders: {},
+      last_refresh: Date.now(),
+    };
+  }
+
+  try {
+    const metainfoContent = await db.getGlobalValue('video.metainfo');
+    if (metainfoContent) {
+      return JSON.parse(metainfoContent);
+    }
+  } catch (error) {
+    console.error('[OpenList Refresh] 读取现有 metainfo 失败:', error);
+  }
+
+  return {
+    folders: {},
+    last_refresh: Date.now(),
+  };
+}
+
+async function listRootFolders(
+  client: OpenListClient,
+  rootPath: string
+): Promise<any[]> {
+  const folders: any[] = [];
+  let currentPage = 1;
+  const pageSize = 100;
+
+  while (true) {
+    const listResponse = await client.listDirectory(
+      rootPath,
+      currentPage,
+      pageSize,
+      true
+    );
+    if (listResponse.code !== 200) {
+      throw new Error(`OpenList 列表获取失败: ${rootPath}`);
+    }
+
+    const content = listResponse.data.content || [];
+    folders.push(...content.filter((item) => item.is_dir));
+
+    if (content.length < pageSize) {
+      break;
+    }
+
+    currentPage++;
+  }
+
+  return folders;
+}
+
 /**
- * 扫描多个根目录
+ * 扫描多个根目录：先汇总全部文件夹数量，再连续累计进度，最后统一完成任务
  */
 async function performMultiRootScan(
   taskId: string,
@@ -165,218 +220,210 @@ async function performMultiRootScan(
   clearMetaInfo: boolean,
   scanMode: 'torrent' | 'name' | 'hybrid'
 ): Promise<void> {
-  for (let i = 0; i < rootPaths.length; i++) {
-    const rootPath = rootPaths[i];
-
-    console.log(`[OpenList Refresh] 扫描根目录 (${i + 1}/${rootPaths.length}): ${rootPath}`);
-    try {
-      await performScan(
-        taskId,
-        url,
-        rootPath,
-        tmdbApiKey,
-        tmdbProxy,
-        tmdbReverseProxy,
-        username,
-        password,
-        clearMetaInfo && i === 0, // 只在第一个根目录时清除
-        scanMode
-      );
-    } catch (error) {
-      console.error(`[OpenList Refresh] 根目录 ${rootPath} 扫描失败:`, error);
-      // 继续扫描其他根目录
-    }
-  }
-}
-
-/**
- * 执行扫描任务
- */
-async function performScan(
-  taskId: string,
-  url: string,
-  rootPath: string,
-  tmdbApiKey: string,
-  tmdbProxy?: string,
-  tmdbReverseProxy?: string,
-  username?: string,
-  password?: string,
-  clearMetaInfo?: boolean,
-  scanMode: 'torrent' | 'name' | 'hybrid' = 'hybrid'
-): Promise<void> {
-  const client = new OpenListClient(url, username!, password!);
+  const client = new OpenListClient(url, username, password);
 
   updateScanTaskProgress(taskId, 0, 0);
 
   try {
-    let metaInfo: MetaInfo;
-
-    if (clearMetaInfo) {
-      metaInfo = {
-        folders: {},
-        last_refresh: Date.now(),
-      };
-    } else {
-      try {
-        const metainfoContent = await db.getGlobalValue('video.metainfo');
-        if (metainfoContent) {
-          metaInfo = JSON.parse(metainfoContent);
-        } else {
-          metaInfo = {
-            folders: {},
-            last_refresh: Date.now(),
-          };
-        }
-      } catch (error) {
-        console.error('[OpenList Refresh] 读取现有 metainfo 失败:', error);
-        metaInfo = {
-          folders: {},
-          last_refresh: Date.now(),
-        };
-      }
-    }
-
+    const metaInfo = await loadMetaInfo(clearMetaInfo);
     invalidateMetaInfoCache();
 
-    const folders: any[] = [];
-    let currentPage = 1;
-    const pageSize = 100;
-    let total = 0;
+    const rootFolderGroups: { rootPath: string; folders: any[] }[] = [];
+    let totalFolders = 0;
 
-    while (true) {
-      const listResponse = await client.listDirectory(rootPath, currentPage, pageSize, true);
-	  console.log(listResponse);
-      if (listResponse.code !== 200) {
-        throw new Error('OpenList 列表获取失败5');
+    for (let i = 0; i < rootPaths.length; i++) {
+      const rootPath = rootPaths[i];
+      console.log(
+        `[OpenList Refresh] 列举根目录 (${i + 1}/${rootPaths.length}): ${rootPath}`
+      );
+
+      try {
+        const folders = await listRootFolders(client, rootPath);
+        rootFolderGroups.push({ rootPath, folders });
+        totalFolders += folders.length;
+        console.log(
+          `[OpenList Refresh] 根目录 ${rootPath} 发现 ${folders.length} 个文件夹`
+        );
+      } catch (error) {
+        console.error(`[OpenList Refresh] 根目录 ${rootPath} 列举失败:`, error);
       }
-
-      total = listResponse.data.total;
-      const pageFolders = listResponse.data.content.filter((item) => item.is_dir);
-      folders.push(...pageFolders);
-
-      // 判断是否还有更多数据：当前页为 null 或数据量小于 pageSize 说明已经是最后一页
-      if (!listResponse.data.content || listResponse.data.content.length < pageSize) {
-        break;
-      }
-
-      currentPage++;
     }
 
-    updateScanTaskProgress(taskId, 0, folders.length);
+    if (rootFolderGroups.length === 0) {
+      throw new Error('所有根目录列举失败');
+    }
 
+    updateScanTaskProgress(taskId, 0, totalFolders);
+
+    let processed = 0;
     let newCount = 0;
     let existingCount = 0;
     let errorCount = 0;
 
     const existingKeys = new Set<string>(Object.keys(metaInfo.folders));
-
     const folderNameToKey = new Map<string, string>();
     for (const [key, info] of Object.entries(metaInfo.folders)) {
       folderNameToKey.set(info.folderName, key);
     }
 
-    for (let i = 0; i < folders.length; i++) {
-      const folder = folders[i];
+    for (const { rootPath, folders } of rootFolderGroups) {
+      console.log(
+        `[OpenList Refresh] 处理根目录: ${rootPath} (${folders.length} 个文件夹)`
+      );
 
-      updateScanTaskProgress(taskId, i + 1, folders.length, folder.name);
+      for (const folder of folders) {
+        processed++;
+        updateScanTaskProgress(
+          taskId,
+          processed,
+          totalFolders,
+          folder.name
+        );
 
-      // folderName 存储完整路径（包含根目录）
-      const fullFolderPath = `${rootPath}${rootPath.endsWith('/') ? '' : '/'}${folder.name}`;
+        const fullFolderPath = `${rootPath}${rootPath.endsWith('/') ? '' : '/'}${folder.name}`;
 
-      if (!clearMetaInfo && folderNameToKey.has(fullFolderPath)) {
-        existingCount++;
-        continue;
-      }
-
-      const folderKey = generateFolderKey(fullFolderPath, existingKeys);
-      existingKeys.add(folderKey);
-
-      try {
-        let searchQuery: string;
-        let seasonNumber: number | null = null;
-        let year: number | null = null;
-        let searchResult: any;
-
-        if (scanMode === 'torrent' || scanMode === 'hybrid') {
-          const torrentInfo = parseTorrentName(folder.name);
-          searchQuery = torrentInfo.title || folder.name;
-          seasonNumber = torrentInfo.season || null;
-          year = torrentInfo.year || null;
-
-          console.log(`[OpenList Refresh] 种子库模式 - 文件夹: ${folder.name}`);
-          console.log(`[OpenList Refresh] 解析结果 - 标题: ${searchQuery}, 季度: ${seasonNumber}, 年份: ${year}`);
-
-          searchResult = await searchTMDB(tmdbApiKey, searchQuery, tmdbProxy, year || undefined, tmdbReverseProxy);
+        if (!clearMetaInfo && folderNameToKey.has(fullFolderPath)) {
+          existingCount++;
+          continue;
         }
 
-        if (scanMode === 'name' || (scanMode === 'hybrid' && (!searchResult || searchResult.code !== 200 || !searchResult.result))) {
-          const seasonInfo = parseSeasonFromTitle(folder.name);
-          searchQuery = seasonInfo.cleanTitle || folder.name;
-          seasonNumber = seasonInfo.seasonNumber;
-          year = seasonInfo.year;
+        const folderKey = generateFolderKey(fullFolderPath, existingKeys);
+        existingKeys.add(folderKey);
 
-          console.log(`[OpenList Refresh] 名字匹配模式 - 文件夹: ${folder.name}`);
-          console.log(`[OpenList Refresh] 清理后标题: ${searchQuery}, 季度: ${seasonNumber}, 年份: ${year}`);
+        try {
+          let searchQuery: string;
+          let seasonNumber: number | null = null;
+          let year: number | null = null;
+          let searchResult: any;
 
-          searchResult = await searchTMDB(tmdbApiKey, searchQuery, tmdbProxy, year || undefined, tmdbReverseProxy);
-        }
+          if (scanMode === 'torrent' || scanMode === 'hybrid') {
+            const torrentInfo = parseTorrentName(folder.name);
+            searchQuery = torrentInfo.title || folder.name;
+            seasonNumber = torrentInfo.season || null;
+            year = torrentInfo.year || null;
 
-        if (searchResult.code === 200 && searchResult.result) {
-          const result = searchResult.result;
+            console.log(`[OpenList Refresh] 种子库模式 - 文件夹: ${folder.name}`);
+            console.log(
+              `[OpenList Refresh] 解析结果 - 标题: ${searchQuery}, 季度: ${seasonNumber}, 年份: ${year}`
+            );
 
-          const folderInfo: any = {
-            folderName: fullFolderPath,
-            tmdb_id: result.id,
-            title: result.title || result.name || folder.name,
-            poster_path: result.poster_path,
-            release_date: result.release_date || result.first_air_date || '',
-            overview: result.overview,
-            vote_average: result.vote_average,
-            media_type: result.media_type,
-            last_updated: Date.now(),
-            failed: false,
-          };
-
-          if (result.media_type === 'tv' && seasonNumber) {
-            try {
-              const seasonDetails = await getTVSeasonDetails(
-                tmdbApiKey,
-                result.id,
-                seasonNumber,
-                tmdbProxy,
-                tmdbReverseProxy
-              );
-
-              if (seasonDetails.code === 200 && seasonDetails.season) {
-                folderInfo.season_number = seasonDetails.season.season_number;
-                folderInfo.season_name = seasonDetails.season.name;
-
-                if (seasonDetails.season.season_number > 1) {
-                  folderInfo.title = `${folderInfo.title} ${seasonDetails.season.name}`;
-                }
-
-                if (seasonDetails.season.poster_path) {
-                  folderInfo.poster_path = seasonDetails.season.poster_path;
-                }
-                if (seasonDetails.season.overview) {
-                  folderInfo.overview = seasonDetails.season.overview;
-                }
-                if (seasonDetails.season.air_date) {
-                  folderInfo.release_date = seasonDetails.season.air_date;
-                }
-              } else {
-                console.warn(`[OpenList Refresh] 获取季度 ${seasonNumber} 详情失败`);
-                folderInfo.season_number = seasonNumber;
-              }
-            } catch (error) {
-              console.error(`[OpenList Refresh] 获取季度详情异常:`, error);
-              folderInfo.season_number = seasonNumber;
-            }
+            searchResult = await searchTMDB(
+              tmdbApiKey,
+              searchQuery,
+              tmdbProxy,
+              year || undefined,
+              tmdbReverseProxy
+            );
           }
 
-          metaInfo.folders[folderKey] = folderInfo;
-          newCount++;
-        } else {
+          if (
+            scanMode === 'name' ||
+            (scanMode === 'hybrid' &&
+              (!searchResult ||
+                searchResult.code !== 200 ||
+                !searchResult.result))
+          ) {
+            const seasonInfo = parseSeasonFromTitle(folder.name);
+            searchQuery = seasonInfo.cleanTitle || folder.name;
+            seasonNumber = seasonInfo.seasonNumber;
+            year = seasonInfo.year;
+
+            console.log(`[OpenList Refresh] 名字匹配模式 - 文件夹: ${folder.name}`);
+            console.log(
+              `[OpenList Refresh] 清理后标题: ${searchQuery}, 季度: ${seasonNumber}, 年份: ${year}`
+            );
+
+            searchResult = await searchTMDB(
+              tmdbApiKey,
+              searchQuery,
+              tmdbProxy,
+              year || undefined,
+              tmdbReverseProxy
+            );
+          }
+
+          if (searchResult.code === 200 && searchResult.result) {
+            const result = searchResult.result;
+
+            const folderInfo: any = {
+              folderName: fullFolderPath,
+              tmdb_id: result.id,
+              title: result.title || result.name || folder.name,
+              poster_path: result.poster_path,
+              release_date: result.release_date || result.first_air_date || '',
+              overview: result.overview,
+              vote_average: result.vote_average,
+              media_type: result.media_type,
+              last_updated: Date.now(),
+              failed: false,
+            };
+
+            if (result.media_type === 'tv' && seasonNumber) {
+              try {
+                const seasonDetails = await getTVSeasonDetails(
+                  tmdbApiKey,
+                  result.id,
+                  seasonNumber,
+                  tmdbProxy,
+                  tmdbReverseProxy
+                );
+
+                if (seasonDetails.code === 200 && seasonDetails.season) {
+                  folderInfo.season_number =
+                    seasonDetails.season.season_number;
+                  folderInfo.season_name = seasonDetails.season.name;
+
+                  if (seasonDetails.season.season_number > 1) {
+                    folderInfo.title = `${folderInfo.title} ${seasonDetails.season.name}`;
+                  }
+
+                  if (seasonDetails.season.poster_path) {
+                    folderInfo.poster_path = seasonDetails.season.poster_path;
+                  }
+                  if (seasonDetails.season.overview) {
+                    folderInfo.overview = seasonDetails.season.overview;
+                  }
+                  if (seasonDetails.season.air_date) {
+                    folderInfo.release_date = seasonDetails.season.air_date;
+                  }
+                } else {
+                  console.warn(
+                    `[OpenList Refresh] 获取季度 ${seasonNumber} 详情失败`
+                  );
+                  folderInfo.season_number = seasonNumber;
+                }
+              } catch (error) {
+                console.error(`[OpenList Refresh] 获取季度详情异常:`, error);
+                folderInfo.season_number = seasonNumber;
+              }
+            }
+
+            metaInfo.folders[folderKey] = folderInfo;
+            folderNameToKey.set(fullFolderPath, folderKey);
+            newCount++;
+          } else {
+            metaInfo.folders[folderKey] = {
+              folderName: fullFolderPath,
+              tmdb_id: 0,
+              title: folder.name,
+              poster_path: null,
+              release_date: '',
+              overview: '',
+              vote_average: 0,
+              media_type: 'movie',
+              last_updated: Date.now(),
+              failed: true,
+            };
+            folderNameToKey.set(fullFolderPath, folderKey);
+            errorCount++;
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        } catch (error) {
+          console.error(
+            `[OpenList Refresh] 处理文件夹失败: ${folder.name}`,
+            error
+          );
           metaInfo.folders[folderKey] = {
             folderName: fullFolderPath,
             tmdb_id: 0,
@@ -389,33 +436,15 @@ async function performScan(
             last_updated: Date.now(),
             failed: true,
           };
+          folderNameToKey.set(fullFolderPath, folderKey);
           errorCount++;
         }
-
-        await new Promise((resolve) => setTimeout(resolve, 300));
-      } catch (error) {
-        console.error(`[OpenList Refresh] 处理文件夹失败: ${folder.name}`, error);
-        metaInfo.folders[folderKey] = {
-          folderName: fullFolderPath,
-          tmdb_id: 0,
-          title: folder.name,
-          poster_path: null,
-          release_date: '',
-          overview: '',
-          vote_average: 0,
-          media_type: 'movie',
-          last_updated: Date.now(),
-          failed: true,
-        };
-        errorCount++;
       }
     }
 
     metaInfo.last_refresh = Date.now();
 
-    const metainfoContent = JSON.stringify(metaInfo);
-    await db.setGlobalValue('video.metainfo', metainfoContent);
-
+    await db.setGlobalValue('video.metainfo', JSON.stringify(metaInfo));
     invalidateMetaInfoCache();
     setCachedMetaInfo(metaInfo);
 
@@ -425,7 +454,7 @@ async function performScan(
     await db.saveAdminConfig(config);
 
     completeScanTask(taskId, {
-      total: folders.length,
+      total: totalFolders,
       new: newCount,
       existing: existingCount,
       errors: errorCount,

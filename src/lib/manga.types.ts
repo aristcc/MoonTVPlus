@@ -18,6 +18,17 @@ export interface MangaSearchItem {
   genre?: string;
 }
 
+export interface MangaSearchFailure {
+  sourceId: string;
+  sourceName: string;
+  error: string;
+}
+
+export interface MangaSearchResult {
+  results: MangaSearchItem[];
+  failedSources: MangaSearchFailure[];
+}
+
 export type MangaRecommendType = 'POPULAR' | 'LATEST';
 
 export interface MangaRecommendResult {

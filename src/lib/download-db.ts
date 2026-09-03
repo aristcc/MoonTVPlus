@@ -19,7 +19,7 @@ export interface SavedTask {
   source?: string;
   videoId?: string;
   episodeIndex?: number;
-  downloadMode?: 'browser' | 'filesystem';
+  downloadMode?: 'browser' | 'filesystem' | 'indexeddb';
   rangeDownload: {
     isShowRange: boolean;
     startSegment: number;
@@ -29,6 +29,16 @@ export interface SavedTask {
   m3u8Content?: string;
   createdAt: number;
   completedAt?: number;
+  segmentLogs?: Array<{
+    id: string;
+    index: number;
+    status: 'queued' | 'downloading' | 'success' | 'retry' | 'error' | 'timeout' | 'aborted';
+    message: string;
+    timestamp: number;
+    retryCount?: number;
+    durationMs?: number;
+    httpStatus?: number;
+  }>;
 }
 
 export interface CompletedTask {
@@ -41,7 +51,7 @@ export interface CompletedTask {
   episodeTitle?: string; // 集数标题
   fileSize?: number; // 文件大小（字节）
   completedAt: number;
-  downloadMode: 'browser' | 'filesystem';
+  downloadMode: 'browser' | 'filesystem' | 'indexeddb';
 }
 
 const DB_NAME = 'MoonTVPlus';

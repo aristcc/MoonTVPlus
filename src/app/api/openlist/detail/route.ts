@@ -4,13 +4,17 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getConfig } from '@/lib/config';
+import { requireFeaturePermission } from '@/lib/permissions';
 import { OpenListClient } from '@/lib/openlist.client';
 import {
   getCachedVideoInfo,
   setCachedVideoInfo,
   VideoInfo,
 } from '@/lib/openlist-cache';
-import { parseVideoFileName } from '@/lib/video-parser';
+import {
+  formatEpisodeDisplayTitle,
+  parseVideoFileName,
+} from '@/lib/video-parser';
 
 export const runtime = 'nodejs';
 
@@ -20,6 +24,8 @@ export const runtime = 'nodejs';
  */
 export async function GET(request: NextRequest) {
   try {
+    const authResult = await requireFeaturePermission(request, 'private_library', '无权限访问私人影库');
+    if (authResult instanceof NextResponse) return authResult;
     const authInfo = getAuthInfoFromCookie(request);
     if (!authInfo || !authInfo.username) {
       return NextResponse.json({ error: '未授权' }, { status: 401 });
@@ -162,6 +168,13 @@ export async function GET(request: NextRequest) {
 
     // 5. 构建集数信息（不包含播放链接）
     // 确保所有视频文件都被显示，即使 videoInfo 中没有记录
+    const parsedSeasons = new Set(
+      videoFiles
+        .map((file) => parseVideoFileName(file.name).season)
+        .filter((season): season is number => typeof season === 'number')
+    );
+    const hasMultipleSeasons = parsedSeasons.size > 1;
+
     const episodes = videoFiles
       .map((file, index) => {
         // 总是重新解析文件名，确保使用最新的解析逻辑
@@ -192,9 +205,12 @@ export async function GET(request: NextRequest) {
         }
 
         // 优先使用解析出的标题，其次是"第X集"格式，最后才是文件名
-        let displayTitle = episodeInfo.title;
-        if (!displayTitle && episodeInfo.episode) {
-          displayTitle = episodeInfo.isOVA ? `OVA ${episodeInfo.episode}` : `第${episodeInfo.episode}集`;
+        let displayTitle = formatEpisodeDisplayTitle(
+            { episode: episodeInfo.episode, season: episodeInfo.season, isOVA: episodeInfo.isOVA },
+            hasMultipleSeasons
+          );
+        if (!displayTitle) {
+          displayTitle = episodeInfo.title;
         }
         if (!displayTitle) {
           displayTitle = file.name;
@@ -220,11 +236,19 @@ export async function GET(request: NextRequest) {
         return a.fileName.localeCompare(b.fileName);
       });
 
+    const { resolvePathMeta } = await import('@/lib/openlist-path-meta');
+    const pathMetaResolved = resolvePathMeta(
+      folderName,
+      openListConfig.PathMeta
+    );
+
     return NextResponse.json({
       success: true,
       folder: folderName,
       episodes,
       videoInfo,
+      category: pathMetaResolved.category,
+      refresh14m: pathMetaResolved.refresh14m,
     });
   } catch (error) {
     console.error('获取视频详情失败:', error);

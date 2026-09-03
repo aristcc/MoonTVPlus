@@ -1,5 +1,8 @@
 // AI评论生成核心逻辑
 
+import { normalizeApiBaseUrl } from '@/lib/url';
+import { parseStringPromise } from 'xml2js';
+
 export interface AIComment {
   id: string;
   userName: string;
@@ -22,7 +25,7 @@ interface GenerateCommentsParams {
     Temperature?: number;
     MaxTokens?: number;
     EnableWebSearch?: boolean;
-    WebSearchProvider?: 'tavily' | 'serper' | 'serpapi';
+    WebSearchProvider?: 'tavily' | 'serper' | 'serpapi' | 'bing';
     TavilyApiKey?: string;
     SerperApiKey?: string;
     SerpApiKey?: string;
@@ -141,6 +144,25 @@ async function searchMovieInfo(
           .join('\n')
           .slice(0, 1000);
       }
+    } else if (provider === 'bing') {
+      const response = await fetch(
+        `https://www.bing.com/search?format=rss&q=${encodeURIComponent(movieName + ' 影评 评价')}`,
+        {
+          headers: {
+            Accept: 'application/rss+xml, application/xml, text/xml',
+            'User-Agent': 'Mozilla/5.0 (compatible; MoonTVPlusBot/1.0)',
+          },
+        }
+      );
+      if (response.ok) {
+        const parsed = await parseStringPromise(await response.text(), { trim: true });
+        const items = parsed?.rss?.channel?.[0]?.item || [];
+        searchResults = items
+          .slice(0, 5)
+          .map((item: any) => item.description?.[0] || '')
+          .join('\n')
+          .slice(0, 1000);
+      }
     }
 
     return searchResults;
@@ -164,7 +186,8 @@ export async function generateAIComments(
     const prompt = buildCommentPrompt(movieName, movieInfo, searchResults, count);
 
     // 3. 调用AI API
-    const response = await fetch(`${aiConfig.CustomBaseURL}/chat/completions`, {
+    const baseURL = normalizeApiBaseUrl(aiConfig.CustomBaseURL);
+    const response = await fetch(`${baseURL}/chat/completions`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${aiConfig.CustomApiKey}`,

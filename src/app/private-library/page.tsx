@@ -91,6 +91,9 @@ export default function PrivateLibraryPage() {
   const [xiaoyaSearchResults, setXiaoyaSearchResults] = useState<Array<{ name: string; path: string }>>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [mounted, setMounted] = useState(false);
+  // OpenList 分类筛选（PathMeta 完全匹配后的 category）
+  const [openlistCategory, setOpenlistCategory] = useState<string>('all');
+  const [openlistCategories, setOpenlistCategories] = useState<string[]>([]);
   const pageSize = 20;
   const observerTarget = useRef<HTMLDivElement>(null);
   const isFetchingRef = useRef(false);
@@ -107,6 +110,12 @@ export default function PrivateLibraryPage() {
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  useEffect(() => {
+    if (mounted && !runtimeConfig.PRIVATE_LIBRARY_ENABLED) {
+      router.replace('/');
+    }
+  }, [mounted, router, runtimeConfig]);
 
   // 小雅搜索处理函数
   const handleXiaoyaSearch = async () => {
@@ -208,6 +217,7 @@ export default function PrivateLibraryPage() {
     setHasMore(true);
     setError('');
     setSelectedView('all');
+    setOpenlistCategory('all');
     setLoading(false);
     setLoadingMore(false);
     isFetchingRef.current = false;
@@ -225,6 +235,20 @@ export default function PrivateLibraryPage() {
     setLoadingMore(false);
     isFetchingRef.current = false;
   }, [selectedView]);
+
+  // 切换 OpenList 分类时重置状态
+  useEffect(() => {
+    if (!isInitializedRef.current) return;
+    if (sourceType !== 'openlist') return;
+
+    setPage(1);
+    setVideos([]);
+    setHasMore(true);
+    setError('');
+    setLoading(false);
+    setLoadingMore(false);
+    isFetchingRef.current = false;
+  }, [openlistCategory, sourceType]);
 
   // 切换排序时重置状态（但不在初始化时执行）
   useEffect(() => {
@@ -450,7 +474,11 @@ export default function PrivateLibraryPage() {
         setError('');
 
         const endpoint = sourceType === 'openlist'
-          ? `/api/openlist/list?page=${page}&pageSize=${pageSize}`
+          ? `/api/openlist/list?page=${page}&pageSize=${pageSize}${
+              openlistCategory && openlistCategory !== 'all'
+                ? `&category=${encodeURIComponent(openlistCategory)}`
+                : ''
+            }`
           : sourceType === 'xiaoya'
           ? `/api/xiaoya/browse?path=${encodeURIComponent(xiaoyaPath)}`
           : `/api/emby/list?page=${page}&pageSize=${pageSize}${selectedView !== 'all' ? `&parentId=${selectedView}` : ''}&embyKey=${embyKey}&sortBy=${sortBy}&sortOrder=${sortOrder}`;
@@ -476,6 +504,10 @@ export default function PrivateLibraryPage() {
             setVideos([]); // 小雅不使用 videos 状态
             setHasMore(false); // 小雅不需要分页
           } else {
+            if (sourceType === 'openlist' && Array.isArray(data.categories)) {
+              setOpenlistCategories(data.categories);
+            }
+
             const newVideos = data.list || [];
 
             if (isInitial) {
@@ -522,7 +554,7 @@ export default function PrivateLibraryPage() {
         abortControllerRef.current.abort();
       }
     };
-  }, [sourceType, embyKey, page, selectedView, xiaoyaPath, runtimeConfig, sortBy, sortOrder]);
+  }, [sourceType, embyKey, page, selectedView, xiaoyaPath, runtimeConfig, sortBy, sortOrder, openlistCategory]);
 
   const handleVideoClick = (video: Video) => {
     // 构建source参数
@@ -652,6 +684,51 @@ export default function PrivateLibraryPage() {
                       }`}
                     >
                       {option.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* OpenList 分类筛选（PathMeta） */}
+        {sourceType === 'openlist' && openlistCategories.length > 0 && (
+          <div className='mb-6'>
+            <div className='text-xs text-gray-500 dark:text-gray-400 mb-2 px-4'>
+              分类
+            </div>
+            <div className='relative'>
+              <div
+                ref={scrollContainerRef}
+                className='overflow-x-auto scrollbar-hide cursor-grab active:cursor-grabbing'
+                onMouseDown={handleMouseDown}
+                onMouseLeave={handleMouseLeave}
+                onMouseUp={handleMouseUp}
+                onMouseMove={handleMouseMove}
+              >
+                <div className='flex gap-2 px-4 min-w-min'>
+                  <button
+                    onClick={() => setOpenlistCategory('all')}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap flex-shrink-0 ${
+                      openlistCategory === 'all'
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'
+                    }`}
+                  >
+                    全部
+                  </button>
+                  {openlistCategories.map((cat) => (
+                    <button
+                      key={cat}
+                      onClick={() => setOpenlistCategory(cat)}
+                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap flex-shrink-0 ${
+                        openlistCategory === cat
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'
+                      }`}
+                    >
+                      {cat}
                     </button>
                   ))}
                 </div>

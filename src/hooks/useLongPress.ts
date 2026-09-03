@@ -103,17 +103,15 @@ export const useLongPress = ({
   // 触摸事件处理器
   const onTouchStart = useCallback(
     (e: React.TouchEvent) => {
-      // 检查是否触摸的是按钮或其他交互元素
+      // 触摸到标记为 data-button 的交互区域（或其子元素）时：
+      // 不启动卡片长按，避免与控件自身手势（如来源数量浮层）冲突
       const target = e.target as HTMLElement;
-      const buttonElement = target.closest('[data-button]');
+      if (target.closest('[data-button]')) {
+        return;
+      }
 
-      // 更精确的按钮检测：只有当触摸目标直接是按钮元素或其直接子元素时才认为是按钮
-      const isDirectButton = target.hasAttribute('data-button');
-      const isButton = !!buttonElement && isDirectButton;
-
-      // 阻止默认的长按行为，但不阻止触摸开始事件
       const touch = e.touches[0];
-      handleStart(touch.clientX, touch.clientY, !!isButton);
+      handleStart(touch.clientX, touch.clientY, false);
     },
     [handleStart]
   );
@@ -128,7 +126,13 @@ export const useLongPress = ({
 
   const onTouchEnd = useCallback(
     (e: React.TouchEvent) => {
-      // 始终阻止默认行为，避免任何系统长按菜单
+      // 只有本 hook 实际接管了触摸手势时才阻止浏览器默认 click。
+      // 若 touchstart 命中 data-button 区域会提前 return，不应在 touchend 阶段
+      // 再 preventDefault/stopPropagation，否则会吞掉外层卡片点击。
+      if (!isActive.current) {
+        return;
+      }
+
       e.preventDefault();
       e.stopPropagation();
       handleEnd();

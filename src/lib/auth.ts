@@ -1,5 +1,7 @@
 import { NextRequest } from 'next/server';
 
+import { isAccessTokenInvalidated } from './access-token-invalidation';
+
 export type AuthInfo = {
   password?: string;
   username?: string;
@@ -65,7 +67,7 @@ export function getAuthInfoFromCookie(request: NextRequest): AuthInfo | null {
     const headerValue = getAuthTokenFromHeader(authHeader);
     const headerAuthInfo = parseAuthInfo(headerValue);
     if (headerAuthInfo) {
-      return headerAuthInfo;
+      return isAccessTokenInvalidated(headerAuthInfo) ? null : headerAuthInfo;
     }
   }
 
@@ -75,7 +77,8 @@ export function getAuthInfoFromCookie(request: NextRequest): AuthInfo | null {
     return null;
   }
 
-  return parseAuthInfo(authCookie.value);
+  const authInfo = parseAuthInfo(authCookie.value);
+  return isAccessTokenInvalidated(authInfo) ? null : authInfo;
 }
 
 // 从cookie获取认证信息 (客户端使用)
