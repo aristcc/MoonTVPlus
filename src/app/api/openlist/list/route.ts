@@ -4,23 +4,30 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getConfig } from '@/lib/config';
+import { requireFeaturePermission } from '@/lib/permissions';
 import { db } from '@/lib/db';
-import { OpenListClient } from '@/lib/openlist.client';
 import {
   getCachedMetaInfo,
   MetaInfo,
   setCachedMetaInfo,
 } from '@/lib/openlist-cache';
+import {
+  listPathMetaCategories,
+  resolvePathMeta,
+} from '@/lib/openlist-path-meta';
 import { getTMDBImageUrl } from '@/lib/tmdb.search';
 
 export const runtime = 'nodejs';
 
 /**
- * GET /api/openlist/list?page=1&pageSize=20&includeFailed=false&noCache=false
+ * GET /api/openlist/list?page=1&pageSize=20&includeFailed=false&noCache=false&category=
  * 获取私人影库视频列表
+ * category: 分类名；__none__ 表示未分类
  */
 export async function GET(request: NextRequest) {
   try {
+    const authResult = await requireFeaturePermission(request, 'private_library', '无权限访问私人影库');
+    if (authResult instanceof NextResponse) return authResult;
     const authInfo = getAuthInfoFromCookie(request);
     if (!authInfo || !authInfo.username) {
       return NextResponse.json({ error: '未授权' }, { status: 401 });
@@ -31,6 +38,7 @@ export async function GET(request: NextRequest) {
     const pageSize = parseInt(searchParams.get('pageSize') || '20');
     const includeFailed = searchParams.get('includeFailed') === 'true';
     const noCache = searchParams.get('noCache') === 'true';
+    const categoryFilter = (searchParams.get('category') || '').trim();
 
     const config = await getConfig();
     const openListConfig = config.OpenListConfig;
@@ -43,16 +51,13 @@ export async function GET(request: NextRequest) {
       !openListConfig.Password
     ) {
       return NextResponse.json(
-        { error: 'OpenList 未配置或未启用', list: [], total: 0 },
+        { error: 'OpenList 未配置或未启用', list: [], total: 0, categories: [] },
         { status: 200 }
       );
     }
 
-    const client = new OpenListClient(
-      openListConfig.URL,
-      openListConfig.Username,
-      openListConfig.Password
-    );
+    const pathMeta = openListConfig.PathMeta;
+    const categories = listPathMetaCategories(pathMeta);
 
     // 读取 metainfo (从数据库或缓存)
     let metaInfo: MetaInfo | null = null;
@@ -99,6 +104,7 @@ export async function GET(request: NextRequest) {
             details: (error as Error).message,
             list: [],
             total: 0,
+            categories,
           },
           { status: 200 }
         );
@@ -107,7 +113,7 @@ export async function GET(request: NextRequest) {
 
     if (!metaInfo) {
       return NextResponse.json(
-        { error: '无数据', list: [], total: 0 },
+        { error: '无数据', list: [], total: 0, categories },
         { status: 200 }
       );
     }
@@ -115,33 +121,43 @@ export async function GET(request: NextRequest) {
     // 验证 metaInfo 结构
     if (!metaInfo.folders || typeof metaInfo.folders !== 'object') {
       return NextResponse.json(
-        { error: 'metainfo.json 结构无效', list: [], total: 0 },
+        { error: 'metainfo.json 结构无效', list: [], total: 0, categories },
         { status: 200 }
       );
     }
 
     // 转换为数组并分页
-    const allVideos = Object.entries(metaInfo.folders)
-      .filter(([, info]) => includeFailed || !info.failed) // 根据参数过滤失败的视频
-      .map(
-        ([key, info]) => {
-          return {
-            id: key,
-            folder: info.folderName,
-            tmdbId: info.tmdb_id,
-            title: info.title,
-            poster: getTMDBImageUrl(info.poster_path),
-            releaseDate: info.release_date,
-            overview: info.overview,
-            voteAverage: info.vote_average,
-            mediaType: info.media_type,
-            lastUpdated: info.last_updated,
-            failed: info.failed || false,
-            seasonNumber: info.season_number,
-            seasonName: info.season_name,
-          };
-        }
-      );
+    let allVideos = Object.entries(metaInfo.folders)
+      .filter(([, info]) => includeFailed || !info.failed)
+      .map(([key, info]) => {
+        const pathMetaResolved = resolvePathMeta(info.folderName, pathMeta);
+        return {
+          id: key,
+          folder: info.folderName,
+          tmdbId: info.tmdb_id,
+          title: info.title,
+          poster: getTMDBImageUrl(info.poster_path),
+          releaseDate: info.release_date,
+          overview: info.overview,
+          voteAverage: info.vote_average,
+          mediaType: info.media_type,
+          lastUpdated: info.last_updated,
+          failed: info.failed || false,
+          seasonNumber: info.season_number,
+          seasonName: info.season_name,
+          category: pathMetaResolved.category,
+          refresh14m: pathMetaResolved.refresh14m,
+        };
+      });
+
+    // 分类筛选（完全匹配 PathMeta 后的 category）
+    if (categoryFilter) {
+      if (categoryFilter === '__none__') {
+        allVideos = allVideos.filter((v) => !v.category);
+      } else {
+        allVideos = allVideos.filter((v) => v.category === categoryFilter);
+      }
+    }
 
     // 按更新时间倒序排序
     allVideos.sort((a, b) => b.lastUpdated - a.lastUpdated);
@@ -158,11 +174,18 @@ export async function GET(request: NextRequest) {
       page,
       pageSize,
       totalPages: Math.ceil(total / pageSize),
+      categories,
     });
   } catch (error) {
     console.error('获取视频列表失败:', error);
     return NextResponse.json(
-      { error: '获取失败', details: (error as Error).message, list: [], total: 0 },
+      {
+        error: '获取失败',
+        details: (error as Error).message,
+        list: [],
+        total: 0,
+        categories: [],
+      },
       { status: 500 }
     );
   }

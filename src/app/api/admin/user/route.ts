@@ -2,13 +2,29 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 
+import { invalidateUserAccessTokens } from '@/lib/access-token-invalidation';
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getConfig } from '@/lib/config';
-import { db } from '@/lib/db';
+import { db, getStorage } from '@/lib/db';
+import { sanitizeFeaturePermissions } from '@/lib/feature-permissions';
+import { revokeAllRefreshTokens } from '@/lib/refresh-token';
 
 export const runtime = 'nodejs';
 
 // 支持的操作类型
+
+async function terminateUserSessions(username: string, reason: string): Promise<void> {
+  try {
+    invalidateUserAccessTokens(username);
+    await revokeAllRefreshTokens(username);
+    const storage = getStorage();
+    await storage.deleteAllPushSubscriptions?.(username);
+    console.log(`Terminated all sessions for ${username}: ${reason}`);
+  } catch (error) {
+    console.error(`Failed to terminate sessions for ${username}:`, error);
+  }
+}
+
 const ACTIONS = [
   'add',
   'ban',
@@ -193,6 +209,7 @@ export async function POST(request: NextRequest) {
 
         // 只更新V2存储
         await db.updateUserInfoV2(targetUsername!, { banned: true });
+        await terminateUserSessions(targetUsername!, 'user banned');
         break;
       }
       case 'unban': {
@@ -261,6 +278,7 @@ export async function POST(request: NextRequest) {
 
         // 只更新V2存储
         await db.updateUserInfoV2(targetUsername!, { role: 'user' });
+        await terminateUserSessions(targetUsername!, 'admin role revoked');
         break;
       }
       case 'changePassword': {
@@ -295,6 +313,7 @@ export async function POST(request: NextRequest) {
 
         // 使用新版本修改密码（SHA256加密）
         await db.changePasswordV2(targetUsername!, targetPassword);
+        await terminateUserSessions(targetUsername!, 'password changed by admin');
         break;
       }
       case 'deleteUser': {
@@ -320,7 +339,8 @@ export async function POST(request: NextRequest) {
           );
         }
 
-        // 只删除V2存储中的用户
+        // 先终止目标用户所有会话，再删除V2存储中的用户
+        await terminateUserSessions(targetUsername!, 'user deleted');
         await db.deleteUserV2(targetUsername!);
 
         break;
@@ -356,11 +376,13 @@ export async function POST(request: NextRequest) {
       }
       case 'userGroup': {
         // 用户组管理操作
-        const { groupAction, groupName, enabledApis } = body as {
+        const { groupAction, groupName, enabledApis, permissions } = body as {
           groupAction: 'add' | 'edit' | 'delete';
           groupName: string;
           enabledApis?: string[];
+          permissions?: string[];
         };
+        const normalizedPermissions = sanitizeFeaturePermissions(permissions);
 
         if (!adminConfig.UserConfig.Tags) {
           adminConfig.UserConfig.Tags = [];
@@ -375,6 +397,7 @@ export async function POST(request: NextRequest) {
             adminConfig.UserConfig.Tags.push({
               name: groupName,
               enabledApis: enabledApis || [],
+              permissions: normalizedPermissions,
             });
             break;
           }
@@ -384,6 +407,7 @@ export async function POST(request: NextRequest) {
               return NextResponse.json({ error: '用户组不存在' }, { status: 404 });
             }
             adminConfig.UserConfig.Tags[groupIndex].enabledApis = enabledApis || [];
+            adminConfig.UserConfig.Tags[groupIndex].permissions = normalizedPermissions;
             break;
           }
           case 'delete': {

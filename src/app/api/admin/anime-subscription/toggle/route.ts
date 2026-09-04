@@ -7,6 +7,13 @@ import { db } from '@/lib/db';
 
 export const runtime = 'nodejs';
 
+const downloadTools = ['aria2', 'qBittorrent', 'Transmission'] as const;
+type DownloadTool = typeof downloadTools[number];
+
+function isDownloadTool(tool: unknown): tool is DownloadTool {
+  return typeof tool === 'string' && downloadTools.includes(tool as DownloadTool);
+}
+
 /**
  * PUT /api/admin/anime-subscription/toggle
  * 切换追番功能启用状态
@@ -19,11 +26,18 @@ export async function PUT(req: NextRequest) {
       return NextResponse.json({ error: '无权限访问' }, { status: 403 });
     }
 
-    const { enabled } = await req.json();
+    const { enabled, downloadTool } = await req.json();
 
     if (typeof enabled !== 'boolean') {
       return NextResponse.json(
         { error: 'enabled 必须是布尔值' },
+        { status: 400 }
+      );
+    }
+
+    if (downloadTool !== undefined && !isDownloadTool(downloadTool)) {
+      return NextResponse.json(
+        { error: '下载方式不支持' },
         { status: 400 }
       );
     }
@@ -34,9 +48,18 @@ export async function PUT(req: NextRequest) {
     }
 
     config.AnimeSubscriptionConfig.Enabled = enabled;
+    if (downloadTool !== undefined) {
+      config.AnimeSubscriptionConfig.DownloadTool = downloadTool;
+    } else if (!config.AnimeSubscriptionConfig.DownloadTool) {
+      config.AnimeSubscriptionConfig.DownloadTool = 'aria2';
+    }
     await db.saveAdminConfig(config);
 
-    return NextResponse.json({ success: true, enabled });
+    return NextResponse.json({
+      success: true,
+      enabled,
+      downloadTool: config.AnimeSubscriptionConfig.DownloadTool,
+    });
   } catch (error: any) {
     console.error('切换追番功能状态失败:', error);
     return NextResponse.json(

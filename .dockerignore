@@ -3,3 +3,6 @@
 public/screenshot1.png
 public/screenshot2.png
 public/screenshot3.png
+
+# Android/TV native app sources are not needed in Docker image builds
+apps/

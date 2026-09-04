@@ -4,7 +4,9 @@
 import { Loader2, Search } from 'lucide-react';
 import { Suspense, useEffect, useRef, useState } from 'react';
 
+import { isAnimeCategoryText } from '@/lib/anime-keyword-expr';
 import { ApiSite } from '@/lib/config';
+import { appendSpecialSourceParam } from '@/lib/special-source.client';
 import { SearchResult } from '@/lib/types';
 
 import CapsuleSwitch from '@/components/CapsuleSwitch';
@@ -39,7 +41,7 @@ function SourceSearchPageClient() {
     const fetchApiSites = async () => {
       setIsLoadingSources(true);
       try {
-        const response = await fetch('/api/source-search/sources');
+        const response = await fetch(appendSpecialSourceParam('/api/source-search/sources'));
         const data = await response.json();
         if (data.sources && Array.isArray(data.sources)) {
           setApiSites(data.sources);
@@ -71,7 +73,7 @@ function SourceSearchPageClient() {
       setHasMore(true);
       try {
         const response = await fetch(
-          `/api/source-search/categories?source=${encodeURIComponent(selectedSource)}`
+          appendSpecialSourceParam(`/api/source-search/categories?source=${encodeURIComponent(selectedSource)}`)
         );
         const data = await response.json();
         if (data.categories && Array.isArray(data.categories)) {
@@ -99,7 +101,7 @@ function SourceSearchPageClient() {
       setIsLoadingVideos(true);
       try {
         const response = await fetch(
-          `/api/source-search/videos?source=${encodeURIComponent(selectedSource)}&categoryId=${encodeURIComponent(selectedCategory)}&page=${currentPage}`
+          appendSpecialSourceParam(`/api/source-search/videos?source=${encodeURIComponent(selectedSource)}&categoryId=${encodeURIComponent(selectedCategory)}&page=${currentPage}`)
         );
         const data = await response.json();
         if (data.results && Array.isArray(data.results)) {
@@ -128,7 +130,7 @@ function SourceSearchPageClient() {
       setIsLoadingVideos(true);
       try {
         const response = await fetch(
-          `/api/source-search/search?source=${encodeURIComponent(selectedSource)}&keyword=${encodeURIComponent(searchKeyword)}&page=${currentPage}`
+          appendSpecialSourceParam(`/api/source-search/search?source=${encodeURIComponent(selectedSource)}&keyword=${encodeURIComponent(searchKeyword)}&page=${currentPage}`)
         );
         const data = await response.json();
         if (data.results && Array.isArray(data.results)) {
@@ -358,6 +360,11 @@ function SourceSearchPageClient() {
                         year={item.year}
                         from='source-search'
                         type={item.episodes.length > 1 ? 'tv' : 'movie'}
+                        isAnime={isAnimeCategoryText(
+                          item.type_name,
+                          item.class
+                        )}
+                        typeName={item.type_name || item.class}
                         cmsData={{
                           desc: item.desc,
                           episodes: item.episodes,

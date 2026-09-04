@@ -1,4 +1,5 @@
 import { getConfig } from '@/lib/config';
+import { normalizeApiBaseUrl } from '@/lib/url';
 
 export const runtime = 'nodejs';
 
@@ -91,7 +92,23 @@ export interface LxServerSong {
   interval?: string;
   albumName?: string;
   img?: string;
+  image?: string;
+  imageUrl?: string;
+  albumPicUrl?: string;
+  pic?: string;
+  cover?: string;
   songmid?: string;
+  meta?: {
+    picUrl?: string;
+    albumName?: string;
+  };
+  album?: {
+    picUrl?: string;
+    pic?: string;
+  };
+  al?: {
+    picUrl?: string;
+  };
 }
 
 export function isMusicSource(source: string | null | undefined): source is MusicSource {
@@ -163,8 +180,18 @@ export function normalizeLxSong(song: LxServerSong): MusicV2Song {
     songmid: song.songmid,
     name: song.name,
     artist: song.singer,
-    album: song.albumName,
-    cover: song.img,
+    album: song.albumName || song.meta?.albumName,
+    cover:
+      song.img ||
+      song.pic ||
+      song.cover ||
+      song.image ||
+      song.imageUrl ||
+      song.albumPicUrl ||
+      song.meta?.picUrl ||
+      song.album?.picUrl ||
+      song.album?.pic ||
+      song.al?.picUrl,
     durationText: song.interval,
   });
 }
@@ -183,7 +210,9 @@ export async function getMusicV2Config() {
   const musicConfig = config?.MusicConfig;
 
   const enabled = musicConfig?.Enabled ?? false;
-  const baseUrl = (musicConfig?.BaseUrl || process.env.MUSIC_V2_BASE_URL || '').replace(/\/$/, '');
+  const baseUrl = normalizeApiBaseUrl(
+    musicConfig?.BaseUrl || process.env.MUSIC_V2_BASE_URL || ''
+  );
   const token = musicConfig?.Token || process.env.MUSIC_V2_TOKEN || '';
 
   return { enabled, baseUrl, token };
@@ -215,7 +244,7 @@ async function lxFetch(path: string, init: RequestInit = {}, authMode: LxFetchAu
   const response = await fetch(`${baseUrl}${path}`, {
     ...init,
     headers,
-    signal: AbortSignal.timeout(15000),
+    signal: AbortSignal.timeout(45000),
     cache: 'no-store',
   });
 

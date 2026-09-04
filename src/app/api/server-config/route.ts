@@ -36,9 +36,12 @@ export async function GET(request: NextRequest) {
       SiteName: process.env.NEXT_PUBLIC_SITE_NAME || 'MoonTVPlus',
       StorageType: 'localstorage',
       Version: CURRENT_VERSION,
+      TVModeEnabled: process.env.ENABLE_TV_MODE !== 'false',
       WatchRoom: watchRoomConfig,
       EnableOfflineDownload: process.env.NEXT_PUBLIC_ENABLE_OFFLINE_DOWNLOAD === 'true',
       DanmakuAutoLoadDefault: true,
+      EnableTelegramLogin: Boolean(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_BOT_USERNAME && process.env.TELEGRAM_LOGIN_ENABLED !== 'false'),
+      TelegramBotUsername: process.env.TELEGRAM_BOT_USERNAME || '',
     });
   }
 
@@ -48,6 +51,7 @@ export async function GET(request: NextRequest) {
     SiteName: config.SiteConfig.SiteName,
     StorageType: storageType,
     Version: CURRENT_VERSION,
+    TVModeEnabled: process.env.ENABLE_TV_MODE !== 'false',
     WatchRoom: watchRoomConfig,
     EnableOfflineDownload: process.env.NEXT_PUBLIC_ENABLE_OFFLINE_DOWNLOAD === 'true',
     EnableRegistration: config.SiteConfig.EnableRegistration || false,
@@ -58,9 +62,17 @@ export async function GET(request: NextRequest) {
     EnableOIDCLogin: config.SiteConfig.EnableOIDCLogin || false,
     EnableOIDCRegistration: config.SiteConfig.EnableOIDCRegistration || false,
     OIDCButtonText: config.SiteConfig.OIDCButtonText || '',
+    EnableTelegramLogin: Boolean(
+      config.TelegramConfig?.enabled &&
+      config.TelegramConfig?.loginEnabled &&
+      (config.TelegramConfig?.botToken || process.env.TELEGRAM_BOT_TOKEN) &&
+      (config.TelegramConfig?.botUsername || process.env.TELEGRAM_BOT_USERNAME)
+    ),
+    TelegramBotUsername: config.TelegramConfig?.botUsername || process.env.TELEGRAM_BOT_USERNAME || '',
     DanmakuAutoLoadDefault: config.SiteConfig.DanmakuAutoLoadDefault !== false,
     loginBackgroundImage: config.ThemeConfig?.loginBackgroundImage || '',
     registerBackgroundImage: config.ThemeConfig?.registerBackgroundImage || '',
+    homeBackgroundImage: config.ThemeConfig?.homeBackgroundImage || '',
     progressThumbType: config.ThemeConfig?.progressThumbType || 'default',
     progressThumbPresetId: config.ThemeConfig?.progressThumbPresetId || '',
     progressThumbCustomUrl: config.ThemeConfig?.progressThumbCustomUrl || '',

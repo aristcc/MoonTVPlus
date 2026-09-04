@@ -8,6 +8,8 @@ export interface AdminConfig {
   SiteConfig: {
     SiteName: string;
     Announcement: string;
+    // 公告显示模式：once=单次显示（每个用户每条公告仅显示一次，换公告则重新显示）；every=每次显示（每次打开首页都显示）
+    AnnouncementDisplayMode?: 'once' | 'every';
     SearchDownstreamMaxPage: number;
     SiteInterfaceCacheTime: number;
     DoubanProxyType: string;
@@ -25,6 +27,18 @@ export interface AdminConfig {
     TMDBApiKey?: string;
     TMDBProxy?: string;
     TMDBReverseProxy?: string;
+    // TMDB 图片默认地址：用户未在本地数据源设置中配置时，图片默认使用该地址
+    TMDBImageBaseUrl?: string;
+    // 动漫/Bangumi配置
+    BangumiDataSource?:
+      | 'direct'
+      | 'server-proxy'
+      | 'custom-baseurl'
+      | 'sakura';
+    BangumiApiBaseUrl?: string;
+    BangumiImageBaseUrl?: string;
+    BangumiProxy?: string;
+    LiveChartProxy?: string;
     BannerDataSource?: string; // 轮播图数据源：TMDB、TX 或 Douban
     RecommendationDataSource?: string; // 更多推荐数据源：Douban、TMDB、Mixed、MixedSmart
     // Pansou配置
@@ -37,6 +51,7 @@ export interface AdminConfig {
     MagnetMikanReverseProxy?: string;
     MagnetDmhyReverseProxy?: string;
     MagnetAcgripReverseProxy?: string;
+    MagnetNyaaReverseProxy?: string;
     // 评论功能开关
     EnableComments: boolean;
     // 自定义去广告代码
@@ -65,6 +80,12 @@ export interface AdminConfig {
     OIDCClientSecret?: string; // OIDC Client Secret
     OIDCButtonText?: string; // OIDC登录按钮文字
     OIDCMinTrustLevel?: number; // 最低信任等级（仅LinuxDo网站有效，为0时不判断）
+    // 流量统计配置
+    AnalyticsEnabled?: boolean; // 是否启用流量统计
+    AnalyticsProvider?: 'umami' | 'google' | 'clarity' | 'custom'; // 统计服务提供商
+    AnalyticsScriptUrl?: string; // 脚本URL（Umami: umami.js地址; GA: gtag URL; 自定义: 脚本src）
+    AnalyticsWebsiteId?: string; // 网站ID（Umami: website_id; GA: Measurement ID如G-XXXX; 自定义: 留空）
+    AnalyticsCustomScript?: string; // 自定义统计代码（仅custom模式使用，完整的HTML脚本内容）
   };
   UserConfig: {
     Users: {
@@ -77,8 +98,11 @@ export interface AdminConfig {
     Tags?: {
       name: string;
       enabledApis: string[];
+      permissions?: string[];
     }[];
   };
+  SpecialSourceApis?: string[]; // 特殊源 key 列表，默认对普通入口隐藏
+  ClientAdSourceApis?: string[]; // 客户端去广告源 key 列表：MoonTVPlus APP / OrionTV 请求 source-detail 时 m3u8 套 proxy-m3u8
   SourceConfig: {
     key: string;
     name: string;
@@ -96,10 +120,11 @@ export interface AdminConfig {
     from: 'config' | 'custom';
     disabled?: boolean;
   }[];
+  LiveRefreshIntervalHours?: number; // 电视直播全局刷新间隔（小时），默认12小时
   LiveConfig?: {
     key: string;
     name: string;
-    url: string;  // m3u 地址
+    url: string; // m3u 地址
     ua?: string;
     epg?: string; // 节目单
     from: 'config' | 'custom';
@@ -125,6 +150,7 @@ export interface AdminConfig {
     cacheVersion: number; // CSS版本号（用于缓存控制）
     loginBackgroundImage?: string; // 登录界面背景图
     registerBackgroundImage?: string; // 注册界面背景图
+    homeBackgroundImage?: string; // 首页背景图
     // 进度条图标配置
     progressThumbType?: 'default' | 'preset' | 'custom'; // 图标类型
     progressThumbPresetId?: string; // 预制图标ID
@@ -138,19 +164,61 @@ export interface AdminConfig {
     RootPath?: string; // 旧字段：根目录路径（向后兼容，迁移后删除）
     RootPaths?: string[]; // 新字段：多根目录路径列表
     OfflineDownloadPath: string; // 离线下载目录，默认 "/"
+    OfflineDownloadUseCustomSource?: boolean; // 离线下载是否使用独立 OpenList 源
+    OfflineDownloadURL?: string; // 独立离线下载 OpenList 服务器地址
+    OfflineDownloadUsername?: string; // 独立离线下载 OpenList 账号
+    OfflineDownloadPassword?: string; // 独立离线下载 OpenList 密码
     LastRefreshTime?: number; // 上次刷新时间戳
     ResourceCount?: number; // 资源数量
     ScanInterval?: number; // 定时扫描间隔（分钟），0表示关闭，最低60分钟
     ScanMode?: 'torrent' | 'name' | 'hybrid'; // 扫描模式：torrent=种子库匹配，name=名字匹配，hybrid=混合模式（默认）
     DisableVideoPreview?: boolean; // 禁用预览视频，直接返回直连链接
+    /**
+     * 路径元信息（最长前缀匹配 folder 路径）
+     * key: 规范化路径前缀，如 /videos 可匹配 /videos/某影片
+     */
+    PathMeta?: {
+      [path: string]: {
+        category: string; // 分类名
+        refresh14m: boolean; // 该路径播放时是否启用 14 分钟 URL 续期
+      };
+    };
   };
   NetDiskConfig?: {
     Quark?: {
       Enabled: boolean;
       Cookie: string;
       SavePath: string;
-      PlayTempSavePath: string;
-      OpenListTempPath: string;
+      PlayMode?: 'direct_first' | 'transcode_first';
+      MultiThreadPlayback?: boolean;
+    };
+    Mobile?: {
+      Enabled: boolean;
+      Authorization: string;
+    };
+    Baidu?: {
+      Enabled: boolean;
+      Cookie: string;
+    };
+    Tianyi?: {
+      Enabled: boolean;
+      Account: string;
+      Password: string;
+    };
+    Pan123?: {
+      Enabled: boolean;
+      Account: string;
+      Password: string;
+    };
+    UC?: {
+      Enabled: boolean;
+      Cookie: string;
+      Token?: string;
+      SavePath: string;
+    };
+    Pan115?: {
+      Enabled: boolean;
+      Cookie: string;
     };
   };
   AIConfig?: {
@@ -162,6 +230,7 @@ export interface AdminConfig {
     OpenAIModel?: string; // 模型名称，如gpt-4, gpt-3.5-turbo
     // Claude配置
     ClaudeApiKey?: string;
+    ClaudeBaseURL?: string; // Claude Messages API根地址
     ClaudeModel?: string; // 模型名称，如claude-3-opus-20240229
     // 自定义配置（兼容OpenAI格式的API）
     CustomApiKey?: string;
@@ -180,17 +249,20 @@ export interface AdminConfig {
     DecisionCustomModel?: string;
     // 联网搜索配置
     EnableWebSearch: boolean; // 是否启用联网搜索
-    WebSearchProvider?: 'tavily' | 'serper' | 'serpapi'; // 搜索服务提供商
+    WebSearchProvider?: 'tavily' | 'serper' | 'serpapi' | 'bing'; // 搜索服务提供商
     TavilyApiKey?: string; // Tavily API密钥
     SerperApiKey?: string; // Serper.dev API密钥
     SerpApiKey?: string; // SerpAPI密钥
+    // 新版工具式调用配置
+    EnableNewMode?: boolean; // 是否启用新版工具式调用（LLM 工具/function-calling），默认 true
+    NewProtocol?: 'openai-completions' | 'openai-responses' | 'claude'; // 新版协议，默认 openai-completions
+    MaxContext?: number; // 最大上下文 token 数，默认 131072（128k）
+    CompressThreshold?: number; // 上下文压缩触发阈值百分比（0-100），默认 90；0=关闭
     // 功能开关
     EnableHomepageEntry: boolean; // 首页入口开关
     EnableVideoCardEntry: boolean; // VideoCard入口开关
     EnablePlayPageEntry: boolean; // 播放页入口开关
     EnableAIComments: boolean; // AI评论生成开关
-    // 权限控制
-    AllowRegularUsers: boolean; // 是否允许普通用户使用AI问片（关闭后仅站长和管理员可用）
     // 高级设置
     Temperature?: number; // AI温度参数（0-2），默认0.7
     MaxTokens?: number; // 最大回复token数，默认1000
@@ -222,6 +294,7 @@ export interface AdminConfig {
       transcodeMp4?: boolean; // 转码mp4
       proxyPlay?: boolean; // 视频播放代理开关
       customUserAgent?: string; // 自定义User-Agent
+      embyAuthorizationHeader?: string; // 自定义 X-Emby-Authorization 请求头
     }>;
     // 旧格式：单源配置（向后兼容）
     Enabled?: boolean;
@@ -232,6 +305,7 @@ export interface AdminConfig {
     UserId?: string;
     AuthToken?: string;
     Libraries?: string[];
+    embyAuthorizationHeader?: string;
     LastSyncTime?: number;
     ItemCount?: number;
   };
@@ -253,6 +327,35 @@ export interface AdminConfig {
     SourceIds?: string[]; // 限制可用源
     MaxSources?: number; // 搜索时最多查询多少个源
   };
+  OPDSConfig?: {
+    Enabled: boolean; // 是否启用电子书馆
+    Sources?: Array<{
+      id: string;
+      name: string;
+      type?: 'opds';
+      url: string;
+      enabled?: boolean;
+      authMode?: 'none' | 'basic' | 'header';
+      username?: string;
+      password?: string;
+      headerName?: string;
+      headerValue?: string;
+      searchTemplate?: string;
+      preferFormat?: Array<'epub' | 'pdf'>;
+      language?: string;
+    }>;
+    LegadoSubscriptions?: Array<{
+      id: string;
+      name: string;
+      url: string;
+      enabled?: boolean;
+      sourceCount?: number;
+      lastSyncAt?: number;
+      lastSuccessAt?: number;
+      lastError?: string;
+    }>;
+    CacheTTL?: number;
+  };
   EmailConfig?: {
     enabled: boolean; // 是否启用邮件通知
     provider: 'smtp' | 'resend'; // 邮件发送方式
@@ -271,15 +374,24 @@ export interface AdminConfig {
       from: string; // 发件人邮箱
     };
   };
+  TelegramConfig?: {
+    enabled: boolean; // 是否启用 Telegram Bot
+    botToken?: string; // Bot Token，仅服务端使用
+    botUsername?: string; // Bot 用户名，用于前端跳转
+    webhookSecret?: string; // Webhook Secret Token
+    apiProxy?: string; // Telegram Bot API 系统代理（HTTP/HTTPS proxy）
+    apiBaseUrl?: string; // Telegram Bot API 反代 Base URL
+    loginEnabled?: boolean; // 是否启用 Telegram 登录
+    bindingEnabled?: boolean; // 是否启用用户绑定
+    registrationEnabled?: boolean; // 是否启用 Telegram 注册
+    notificationsEnabled?: boolean; // 是否启用 Telegram 通知
+    defaultNotifications?: boolean; // 新绑定用户默认开启通知
+  };
   MusicConfig?: {
     Enabled?: boolean; // 启用音乐功能
     BaseUrl?: string; // lxserver 地址
     Token?: string; // lxserver x-user-token
     ProxyEnabled?: boolean; // 是否走 stream 代理
-    // 兼容旧代码的遗留字段（待删除）
-    TuneHubEnabled?: boolean;
-    TuneHubBaseUrl?: string;
-    TuneHubApiKey?: string;
     OpenListCacheEnabled?: boolean;
     OpenListCacheURL?: string;
     OpenListCacheUsername?: string;
@@ -289,12 +401,20 @@ export interface AdminConfig {
   };
   AnimeSubscriptionConfig?: {
     Enabled: boolean; // 是否启用追番功能
+    DownloadTool?: 'aria2' | 'qBittorrent' | 'Transmission'; // 追番订阅全局下载方式
     Subscriptions: Array<{
       id: string;
       title: string;
+      /** 包含关键词：支持 & | ()；无运算符时逗号=AND */
       filterText: string;
-      source: 'acgrip' | 'mikan' | 'dmhy';
+      /** 排除关键词：支持 & | ()；无运算符时逗号=OR */
+      excludeText?: string;
+      source: 'acgrip' | 'mikan' | 'dmhy' | 'nyaa';
       enabled: boolean;
+      /** 单集只下载一次（默认 false） */
+      onePerEpisode?: boolean;
+      /** 缺集重新检索（默认 false） */
+      refillMissingEpisodes?: boolean;
       lastCheckTime: number;
       lastEpisode: number;
       createdAt: number;

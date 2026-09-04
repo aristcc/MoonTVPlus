@@ -44,10 +44,11 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const page = parseInt(searchParams.get('page') || '1', 10);
     const limit = parseInt(searchParams.get('limit') || '10', 10);
+    const search = (searchParams.get('search') || '').trim();
     const offset = (page - 1) * limit;
 
     // 获取用户列表（优先使用新版本）
-    const result = await db.getUserListV2(offset, limit, process.env.USERNAME);
+    const result = await db.getUserListV2(offset, limit, process.env.USERNAME, search);
 
     if (result.users.length > 0) {
       // 使用新版本数据

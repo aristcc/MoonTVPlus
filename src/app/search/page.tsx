@@ -21,7 +21,9 @@ import React, {
   useRef,
   useState,
 } from 'react';
+import { createPortal } from 'react-dom';
 
+import { isAnimeCategoryText } from '@/lib/anime-keyword-expr';
 import { getAuthInfoFromBrowserCookie } from '@/lib/auth';
 import {
   addSearchHistory,
@@ -31,13 +33,14 @@ import {
   subscribeToDataUpdates,
 } from '@/lib/db.client';
 import { SearchResult } from '@/lib/types';
+import { appendSpecialSourceParam, isSpecialSourcesEnabledOnDevice } from '@/lib/special-source.client';
 import { processImageUrl } from '@/lib/utils';
 
 import AcgSearch from '@/components/AcgSearch';
 import CapsuleSwitch from '@/components/CapsuleSwitch';
 import ImageViewer from '@/components/ImageViewer';
 import PageLayout from '@/components/PageLayout';
-import PansouSearch from '@/components/PansouSearch';
+import PansouSearch, { CLOUD_TYPE_NAMES } from '@/components/PansouSearch';
 import ProxyImage from '@/components/ProxyImage';
 import SearchResultFilter, {
   SearchFilterCategory,
@@ -45,6 +48,18 @@ import SearchResultFilter, {
 import SearchSuggestions from '@/components/SearchSuggestions';
 import VideoCard, { VideoCardHandle } from '@/components/VideoCard';
 import VirtualScrollableGrid from '@/components/VirtualScrollableGrid';
+import { loadTraditionalToSimplifiedConverter } from '@/lib/danmaku/traditional-to-simplified';
+
+const PANSOU_CLOUD_TYPE_OPTIONS = Object.entries(CLOUD_TYPE_NAMES).map(
+  ([value, label]) => ({ value, label })
+);
+
+type SearchCachePayload = {
+  status: 'complete' | 'partial';
+  results: SearchResult[];
+  query: string;
+  updatedAt: number;
+};
 
 function SearchPageClient() {
   // 搜索历史
@@ -59,10 +74,26 @@ function SearchPageClient() {
   const [triggerPansouSearch, setTriggerPansouSearch] = useState(false);
   // ACG 搜索触发标志
   const [triggerAcgSearch, setTriggerAcgSearch] = useState(false);
+  const [selectedPansouCloudTypes, setSelectedPansouCloudTypes] = useState<
+    string[]
+  >([]);
+  const [pansouCloudFilterOpen, setPansouCloudFilterOpen] = useState(false);
+  const [pansouCloudFilterPosition, setPansouCloudFilterPosition] = useState({
+    x: 0,
+    y: 0,
+    width: 0,
+  });
+  const pansouCloudFilterButtonRef = useRef<HTMLButtonElement | null>(null);
+  const pansouCloudFilterDropdownRef = useRef<HTMLDivElement | null>(null);
   // 用户权限
   const [userRole, setUserRole] = useState<'owner' | 'admin' | 'user' | null>(
     null
   );
+  const [netdiskSearchEnabled, setNetdiskSearchEnabled] = useState(false);
+  const [magnetSearchEnabled, setMagnetSearchEnabled] = useState(false);
+  const [privateLibrarySearchEnabled, setPrivateLibrarySearchEnabled] =
+    useState(false);
+  const [featureFlagsReady, setFeatureFlagsReady] = useState(false);
   // 繁体转简体转换器
   const converterRef = useRef<((text: string) => string) | null>(null);
   // 转换器是否已初始化
@@ -99,20 +130,34 @@ function SearchPageClient() {
   const [isFromCache, setIsFromCache] = useState(false);
   // 精确搜索开关
   const [exactSearch, setExactSearch] = useState(true);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [privateLibraryOnly, setPrivateLibraryOnly] = useState(false);
+  const [privateLibraryOnlyReady, setPrivateLibraryOnlyReady] = useState(false);
+  const privateLibraryOnlyLoadedRef = useRef(false);
+  const advancedButtonRefs = useRef<HTMLButtonElement[]>([]);
+  const advancedDropdownRefs = useRef<HTMLDivElement[]>([]);
 
   // 生成缓存键
   const getCacheKey = (query: string) => {
-    return `search_cache_${query.trim()}`;
+    const suffixParts = [
+      isSpecialSourcesEnabledOnDevice() ? 'special' : '',
+      privateLibraryOnly ? 'private' : '',
+    ].filter(Boolean);
+    const suffix = suffixParts.length > 0 ? `_${suffixParts.join('_')}` : '';
+    return `search_cache_${query.trim()}${suffix}`;
   };
 
-  // 从 sessionStorage 获取缓存的搜索结果
+  // 从 sessionStorage 获取完整缓存的搜索结果（partial 只给播放页快速启动使用）
   const getCachedResults = (query: string): SearchResult[] | null => {
     if (typeof window === 'undefined') return null;
     try {
       const cacheKey = getCacheKey(query);
       const cached = sessionStorage.getItem(cacheKey);
-      if (cached) {
-        return JSON.parse(cached);
+      if (!cached) return null;
+
+      const parsed = JSON.parse(cached) as SearchCachePayload;
+      if (parsed?.status === 'complete' && Array.isArray(parsed.results)) {
+        return parsed.results;
       }
     } catch (error) {
       console.error('Failed to get cached results:', error);
@@ -121,13 +166,33 @@ function SearchPageClient() {
   };
 
   // 保存搜索结果到 sessionStorage
-  const setCachedResults = (query: string, results: SearchResult[]) => {
+  const setCachedResults = (
+    query: string,
+    results: SearchResult[],
+    status: SearchCachePayload['status'] = 'complete'
+  ) => {
     if (typeof window === 'undefined') return;
     try {
       const cacheKey = getCacheKey(query);
-      sessionStorage.setItem(cacheKey, JSON.stringify(results));
+      const payload: SearchCachePayload = {
+        status,
+        results,
+        query: query.trim(),
+        updatedAt: Date.now(),
+      };
+      sessionStorage.setItem(cacheKey, JSON.stringify(payload));
     } catch (error) {
       console.error('Failed to cache results:', error);
+    }
+  };
+
+  const savePartialCacheForPlayback = () => {
+    const query = currentQueryRef.current.trim();
+    if (!query || !eventSourceRef.current || !isLoading) return;
+
+    const snapshot = searchResults.concat(pendingResultsRef.current);
+    if (snapshot.length > 20) {
+      setCachedResults(query, snapshot, 'partial');
     }
   };
 
@@ -760,6 +825,35 @@ function SearchPageClient() {
     }
   }, [resultDisplayMode]);
 
+  useEffect(() => {
+    if (typeof window !== 'undefined' && privateLibraryOnlyLoadedRef.current) {
+      localStorage.setItem('searchPrivateLibraryOnly', String(privateLibraryOnly));
+    }
+  }, [privateLibraryOnly]);
+
+  useEffect(() => {
+    if (!advancedOpen) return;
+
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as Node;
+      const clickedButton = advancedButtonRefs.current.some((ref) =>
+        ref?.contains(target)
+      );
+      const clickedDropdown = advancedDropdownRefs.current.some((ref) =>
+        ref?.contains(target)
+      );
+
+      if (!clickedButton && !clickedDropdown) {
+        setAdvancedOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [advancedOpen]);
+
   const getSearchResultUrl = (params: {
     title: string;
     year?: string;
@@ -845,7 +939,10 @@ function SearchPageClient() {
       <button
         key={item.key}
         type='button'
-        onClick={() => router.push(itemUrl)}
+        onClick={() => {
+          savePartialCacheForPlayback();
+          router.push(itemUrl);
+        }}
         className='group w-full rounded-2xl border border-gray-200/80 bg-white/90 p-3 text-left shadow-sm transition-all hover:border-green-300 hover:shadow-md dark:border-gray-700 dark:bg-gray-900/70 dark:hover:border-green-700'
       >
         <div className='flex items-start gap-4'>
@@ -960,57 +1057,28 @@ function SearchPageClient() {
   }, [activeTab]);
 
   useEffect(() => {
-    // 从 URL 读取搜索类型参数
-    const typeParam = searchParams.get('type');
-    const query = searchParams.get('q');
-
-    if (typeParam === 'pansou' || typeParam === 'acg') {
-      setActiveTab(typeParam);
-
-      // 如果有搜索关键词且显示结果，触发对应的搜索
-      if (query && query.trim()) {
-        setSearchQuery(query);
-        setShowResults(true);
-
-        // 延迟触发搜索，确保组件已经切换到正确的标签页
-        setTimeout(() => {
-          if (typeParam === 'pansou') {
-            setTriggerPansouSearch((prev) => !prev);
-          } else if (typeParam === 'acg') {
-            setTriggerAcgSearch((prev) => !prev);
-          }
-        }, 100);
-      }
-    } else if (typeParam === 'video') {
-      setActiveTab('video');
-    } else if (!typeParam && query) {
-      // 如果没有 type 参数但有查询，默认为 video
-      setActiveTab('video');
-    }
-
-    // 无搜索参数时聚焦搜索框
-    !searchParams.get('q') && document.getElementById('searchInput')?.focus();
-
     // 获取用户权限
     const authInfo = getAuthInfoFromBrowserCookie();
     setUserRole(authInfo?.role || null);
+    const runtimeConfig = (window as any).RUNTIME_CONFIG || {};
+    setNetdiskSearchEnabled(!!runtimeConfig.NETDISK_SEARCH_ENABLED);
+    setMagnetSearchEnabled(!!runtimeConfig.MAGNET_SEARCH_ENABLED);
+    const hasPrivateLibrary = !!runtimeConfig.PRIVATE_LIBRARY_ENABLED;
+    setPrivateLibrarySearchEnabled(hasPrivateLibrary);
+    // 无私人影库权限时，强制关闭"只搜私人影库"（防止 localStorage 残留旧设置继续过滤）
+    if (!hasPrivateLibrary) {
+      setPrivateLibraryOnly(false);
+    }
+    setFeatureFlagsReady(true);
 
     // 初始化繁体转简体转换器
     if (typeof window !== 'undefined') {
-      import('opencc-js')
-        .then((module) => {
-          try {
-            const OpenCC = module.default || module;
-            const converter = OpenCC.Converter({ from: 'hk', to: 'cn' });
-            converterRef.current = converter;
-            setConverterReady(true);
-          } catch (error) {
-            console.error('初始化繁体转简体转换器失败:', error);
-            setConverterReady(true); // 即使失败也设置为 true，避免阻塞
-          }
+      loadTraditionalToSimplifiedConverter()
+        .then((converter) => {
+          converterRef.current = converter;
+          setConverterReady(true);
         })
-        .catch((error) => {
-          console.error('加载 opencc-js 失败:', error);
+        .catch(() => {
           setConverterReady(true); // 即使失败也设置为 true，避免阻塞
         });
     } else {
@@ -1036,6 +1104,15 @@ function SearchPageClient() {
       if (savedExactSearch !== null) {
         setExactSearch(savedExactSearch === 'true');
       }
+
+      const savedPrivateLibraryOnly = localStorage.getItem(
+        'searchPrivateLibraryOnly'
+      );
+      if (savedPrivateLibraryOnly !== null) {
+        setPrivateLibraryOnly(savedPrivateLibraryOnly === 'true');
+      }
+      privateLibraryOnlyLoadedRef.current = true;
+      setPrivateLibraryOnlyReady(true);
     }
 
     // 监听搜索历史更新事件
@@ -1085,8 +1162,40 @@ function SearchPageClient() {
   }, []);
 
   useEffect(() => {
-    // 等待转换器初始化完成
-    if (!converterReady) {
+    if (!featureFlagsReady) return;
+
+    const typeParam = searchParams.get('type');
+    const query = searchParams.get('q');
+
+    if (typeParam === 'pansou') {
+      if (netdiskSearchEnabled) {
+        setActiveTab('pansou');
+      } else {
+        setActiveTab('video');
+      }
+    } else if (typeParam === 'acg') {
+      if (magnetSearchEnabled) {
+        setActiveTab('acg');
+      } else {
+        setActiveTab('video');
+      }
+    } else {
+      setActiveTab('video');
+    }
+
+    if (!query) {
+      document.getElementById('searchInput')?.focus();
+    }
+  }, [
+    searchParams,
+    netdiskSearchEnabled,
+    magnetSearchEnabled,
+    featureFlagsReady,
+  ]);
+
+  useEffect(() => {
+    // 等待转换器和私人影库搜索设置初始化完成
+    if (!converterReady || !privateLibraryOnlyReady) {
       return;
     }
 
@@ -1124,6 +1233,41 @@ function SearchPageClient() {
     }
 
     currentQueryRef.current = query.trim();
+
+    const typeParam = searchParams.get('type');
+    const isVideoSearchType = !typeParam || typeParam === 'video';
+
+    if (!isVideoSearchType) {
+      if (eventSourceRef.current) {
+        try {
+          eventSourceRef.current.close();
+        } catch {}
+        eventSourceRef.current = null;
+      }
+      pendingResultsRef.current = [];
+      if (flushTimerRef.current) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
+      setIsLoading(false);
+      setSearchResults([]);
+      setTotalSources(0);
+      setCompletedSources(0);
+      setIsFromCache(false);
+      if (query) {
+        setSearchQuery(query);
+        setShowResults(true);
+        setShowSuggestions(false);
+        addSearchHistory(query);
+      } else {
+        setShowResults(false);
+        setShowSuggestions(false);
+      }
+      if (forceRefresh) {
+        setForceRefresh(false);
+      }
+      return;
+    }
 
     if (query) {
       setSearchQuery(query);
@@ -1197,9 +1341,10 @@ function SearchPageClient() {
 
       if (currentFluidSearch) {
         // 流式搜索：打开新的流式连接
-        const es = new EventSource(
-          `/api/search/ws?q=${encodeURIComponent(trimmed)}`
-        );
+        const searchUrl = `/api/search/ws?q=${encodeURIComponent(trimmed)}${
+          privateLibraryOnly ? '&privateOnly=1' : ''
+        }`;
+        const es = new EventSource(appendSpecialSourceParam(searchUrl));
         eventSourceRef.current = es;
 
         es.onmessage = (event) => {
@@ -1304,7 +1449,10 @@ function SearchPageClient() {
         };
       } else {
         // 传统搜索：使用普通接口
-        fetch(`/api/search?q=${encodeURIComponent(trimmed)}`)
+        const searchUrl = `/api/search?q=${encodeURIComponent(trimmed)}${
+          privateLibraryOnly ? '&privateOnly=1' : ''
+        }`;
+        fetch(appendSpecialSourceParam(searchUrl))
           .then((response) => response.json())
           .then((data) => {
             if (currentQueryRef.current !== trimmed) return;
@@ -1337,7 +1485,40 @@ function SearchPageClient() {
       setShowResults(false);
       setShowSuggestions(false);
     }
-  }, [searchParams, forceRefresh, converterReady]);
+  }, [
+    searchParams,
+    forceRefresh,
+    converterReady,
+    privateLibraryOnlyReady,
+    privateLibraryOnly,
+  ]);
+
+  useEffect(() => {
+    if (!featureFlagsReady) return;
+
+    const typeParam = searchParams.get('type');
+    const query = searchParams.get('q');
+    if (!query || !query.trim()) return;
+
+    if (typeParam === 'pansou' && netdiskSearchEnabled) {
+      setSearchQuery(query);
+      setShowResults(true);
+      setTimeout(() => {
+        setTriggerPansouSearch((prev) => !prev);
+      }, 100);
+    } else if (typeParam === 'acg' && magnetSearchEnabled) {
+      setSearchQuery(query);
+      setShowResults(true);
+      setTimeout(() => {
+        setTriggerAcgSearch((prev) => !prev);
+      }, 100);
+    }
+  }, [
+    searchParams,
+    netdiskSearchEnabled,
+    magnetSearchEnabled,
+    featureFlagsReady,
+  ]);
 
   // 组件卸载时，关闭可能存在的连接
   useEffect(() => {
@@ -1465,6 +1646,115 @@ function SearchPageClient() {
     }
   };
 
+  const togglePansouCloudType = (cloudType: string) => {
+    setSelectedPansouCloudTypes((prev) =>
+      prev.includes(cloudType)
+        ? prev.filter((type) => type !== cloudType)
+        : [...prev, cloudType]
+    );
+  };
+
+  const calculatePansouCloudFilterPosition = () => {
+    const element = pansouCloudFilterButtonRef.current;
+    if (!element) return;
+
+    const rect = element.getBoundingClientRect();
+    const viewportWidth = window.innerWidth;
+    const padding = 16;
+    const width = Math.min(320, viewportWidth - padding * 2);
+    let x = rect.left;
+
+    if (x + width > viewportWidth - padding) {
+      x = viewportWidth - width - padding;
+    }
+    if (x < padding) {
+      x = padding;
+    }
+
+    setPansouCloudFilterPosition({ x, y: rect.bottom + 8, width });
+  };
+
+  const selectedPansouCloudTypeLabels = selectedPansouCloudTypes
+    .map((type) => CLOUD_TYPE_NAMES[type] || type)
+    .filter(Boolean);
+
+  const renderPansouCloudTypeFilter = () => {
+    const hasFilter = selectedPansouCloudTypes.length > 0;
+    const displayText = hasFilter
+      ? selectedPansouCloudTypes.length === 1
+        ? selectedPansouCloudTypeLabels[0]
+        : `网盘类型 · ${selectedPansouCloudTypes.length}`
+      : '网盘类型';
+
+    return (
+      <div className='mx-auto mt-4 flex max-w-2xl justify-end overflow-visible'>
+        <button
+          ref={pansouCloudFilterButtonRef}
+          type='button'
+          onClick={() => {
+            if (!pansouCloudFilterOpen) {
+              calculatePansouCloudFilterPosition();
+            }
+            setPansouCloudFilterOpen((prev) => !prev);
+          }}
+          className={`relative z-10 rounded-full px-3 py-1 text-xs font-medium transition-all duration-200 whitespace-nowrap focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 dark:focus:ring-offset-gray-900 ${
+            hasFilter
+              ? 'cursor-pointer text-green-600 hover:text-green-700 dark:text-green-400 dark:hover:text-green-300'
+              : 'cursor-pointer text-gray-700 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100'
+          }`}
+          aria-expanded={pansouCloudFilterOpen}
+          aria-haspopup='listbox'
+        >
+          <span>{displayText}</span>
+          <svg
+            className={`ml-1 inline-block h-3 w-3 transition-transform duration-200 ${
+              pansouCloudFilterOpen ? 'rotate-180' : ''
+            }`}
+            fill='none'
+            stroke='currentColor'
+            viewBox='0 0 24 24'
+            aria-hidden='true'
+          >
+            <path
+              strokeLinecap='round'
+              strokeLinejoin='round'
+              strokeWidth={2}
+              d='M19 9l-7 7-7-7'
+            />
+          </svg>
+        </button>
+      </div>
+    );
+  };
+
+  useEffect(() => {
+    if (!pansouCloudFilterOpen) return;
+
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (
+        pansouCloudFilterButtonRef.current?.contains(target) ||
+        pansouCloudFilterDropdownRef.current?.contains(target)
+      ) {
+        return;
+      }
+      setPansouCloudFilterOpen(false);
+    };
+
+    const handleScroll = () => setPansouCloudFilterOpen(false);
+    const handleResize = () => calculatePansouCloudFilterPosition();
+
+    document.addEventListener('mousedown', handleClickOutside);
+    document.body.addEventListener('scroll', handleScroll, { passive: true });
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.body.removeEventListener('scroll', handleScroll);
+      window.removeEventListener('resize', handleResize);
+    };
+  }, [pansouCloudFilterOpen]);
+
   // 返回顶部功能
   const scrollToTop = () => {
     try {
@@ -1496,7 +1786,7 @@ function SearchPageClient() {
     <PageLayout activePath='/search'>
       <div className='px-4 sm:px-10 py-4 sm:py-8 overflow-visible mb-10'>
         {/* 搜索框 */}
-        <div className='mb-8'>
+        <div className='mb-0'>
           <form onSubmit={handleSearch} className='max-w-2xl mx-auto'>
             <div className='relative'>
               <Search className='absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-gray-400 dark:text-gray-500' />
@@ -1542,8 +1832,14 @@ function SearchPageClient() {
                   setSearchQuery(trimmed);
                   setShowResults(true);
                   setShowSuggestions(false);
-
-                  router.push(`/search?q=${encodeURIComponent(trimmed)}`);
+                  router.push(
+                    `/search?q=${encodeURIComponent(trimmed)}&type=${activeTab}`
+                  );
+                  if (activeTab === 'pansou') {
+                    setTriggerPansouSearch((prev) => !prev);
+                  } else if (activeTab === 'acg') {
+                    setTriggerAcgSearch((prev) => !prev);
+                  }
                 }}
               />
             </div>
@@ -1558,13 +1854,16 @@ function SearchPageClient() {
                   value: 'video',
                   icon: <Film size={16} />,
                 },
-                {
-                  label: '网盘搜索',
-                  value: 'pansou',
-                  icon: <HardDrive size={16} />,
-                },
-                // 仅管理员和站长显示 ACG 磁力搜索
-                ...(userRole === 'admin' || userRole === 'owner'
+                ...(netdiskSearchEnabled
+                  ? [
+                      {
+                        label: '网盘搜索',
+                        value: 'pansou' as const,
+                        icon: <HardDrive size={16} />,
+                      },
+                    ]
+                  : []),
+                ...(magnetSearchEnabled
                   ? [
                       {
                         label: '动漫磁力',
@@ -1580,10 +1879,181 @@ function SearchPageClient() {
               }
             />
           </div>
+
+          {activeTab === 'pansou' &&
+            netdiskSearchEnabled &&
+            renderPansouCloudTypeFilter()}
+
+          {activeTab === 'acg' && magnetSearchEnabled && (
+            <div className='mt-4'>
+              <AcgSearch keyword={searchQuery} controlsOnly />
+            </div>
+          )}
+
+          {activeTab === 'video' && !showResults && (
+            <div className='mx-auto mt-4 flex max-w-2xl justify-end'>
+              <div className='relative'>
+                <button
+                  ref={(el) => {
+                    if (el) advancedButtonRefs.current[0] = el;
+                  }}
+                  type='button'
+                  onClick={() => setAdvancedOpen((prev) => !prev)}
+                  className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm transition-colors ${
+                    advancedOpen
+                      ? 'bg-green-50 text-green-600 dark:bg-gray-700/70 dark:text-green-400'
+                      : 'text-gray-600 hover:bg-green-50 hover:text-green-600 dark:text-gray-400 dark:hover:bg-gray-700/50 dark:hover:text-green-400'
+                  }`}
+                  aria-expanded={advancedOpen}
+                >
+                  <span>高级</span>
+                  <ChevronUp
+                    className={`h-4 w-4 transition-transform ${
+                      advancedOpen ? '' : 'rotate-180'
+                    }`}
+                  />
+                </button>
+                {advancedOpen && (
+                  <div
+                    ref={(el) => {
+                      if (el) advancedDropdownRefs.current[0] = el;
+                    }}
+                    className='absolute right-0 z-[70] mt-2 w-56 rounded-xl border border-gray-200 bg-white p-3 shadow-lg dark:border-gray-700 dark:bg-gray-900'
+                  >
+                    <label className='flex cursor-pointer select-none items-center justify-between gap-3 rounded-lg px-1 py-2'>
+                      <span className='text-sm text-gray-700 dark:text-gray-300'>
+                        聚合
+                      </span>
+                      <div className='relative'>
+                        <input
+                          type='checkbox'
+                          className='peer sr-only'
+                          checked={viewMode === 'agg'}
+                          onChange={() =>
+                            setViewMode(viewMode === 'agg' ? 'all' : 'agg')
+                          }
+                        />
+                        <div className='h-5 w-9 rounded-full bg-gray-300 transition-colors peer-checked:bg-green-500 dark:bg-gray-600'></div>
+                        <div className='absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white transition-transform peer-checked:translate-x-4'></div>
+                      </div>
+                    </label>
+                    {privateLibrarySearchEnabled && (
+                      <label className='flex cursor-pointer select-none items-center justify-between gap-3 rounded-lg px-1 py-2'>
+                        <span className='text-sm text-gray-700 dark:text-gray-300'>
+                          只搜私人影库
+                        </span>
+                        <div className='relative'>
+                          <input
+                            type='checkbox'
+                            className='peer sr-only'
+                            checked={privateLibraryOnly}
+                            onChange={(e) =>
+                              setPrivateLibraryOnly(e.target.checked)
+                            }
+                          />
+                          <div className='h-5 w-9 rounded-full bg-gray-300 transition-colors peer-checked:bg-green-500 dark:bg-gray-600'></div>
+                          <div className='absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white transition-transform peer-checked:translate-x-4'></div>
+                        </div>
+                      </label>
+                    )}
+                    <div className='mt-2 border-t border-gray-200 pt-2 dark:border-gray-700'>
+                      <span className='px-1 text-sm text-gray-700 dark:text-gray-300'>
+                        显示方式
+                      </span>
+                      <div className='mt-2 grid grid-cols-2 gap-1 rounded-lg bg-gray-100 p-1 dark:bg-gray-800'>
+                        <button
+                          type='button'
+                          onClick={() => setResultDisplayMode('card')}
+                          className={`inline-flex items-center justify-center gap-1 rounded-md px-2 py-1.5 text-sm transition-colors ${
+                            resultDisplayMode === 'card'
+                              ? 'bg-green-500 text-white'
+                              : 'text-gray-600 hover:bg-white dark:text-gray-300 dark:hover:bg-gray-700'
+                          }`}
+                          aria-label='切换为卡片视图'
+                        >
+                          <Grid2x2 className='h-4 w-4' />
+                          <span>卡片</span>
+                        </button>
+                        <button
+                          type='button'
+                          onClick={() => setResultDisplayMode('list')}
+                          className={`inline-flex items-center justify-center gap-1 rounded-md px-2 py-1.5 text-sm transition-colors ${
+                            resultDisplayMode === 'list'
+                              ? 'bg-green-500 text-white'
+                              : 'text-gray-600 hover:bg-white dark:text-gray-300 dark:hover:bg-gray-700'
+                          }`}
+                          aria-label='切换为列表视图'
+                        >
+                          <List className='h-4 w-4' />
+                          <span>列表</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
         </div>
 
+        {pansouCloudFilterOpen &&
+          createPortal(
+            <div
+              ref={pansouCloudFilterDropdownRef}
+              className='fixed z-[9999] max-h-[50vh] overflow-y-auto rounded-xl border border-gray-200/50 bg-white/95 p-2 backdrop-blur-sm dark:border-gray-700/50 dark:bg-gray-800/95'
+              style={{
+                left: `${pansouCloudFilterPosition.x}px`,
+                top: `${pansouCloudFilterPosition.y}px`,
+                width: `${pansouCloudFilterPosition.width}px`,
+              }}
+            >
+              <div className='grid grid-cols-3 gap-1.5 sm:grid-cols-4'>
+                <button
+                  type='button'
+                  onClick={() => setSelectedPansouCloudTypes([])}
+                  className={`rounded-lg px-2 py-1.5 text-left text-xs transition-all duration-200 ${
+                    selectedPansouCloudTypes.length === 0
+                      ? 'border border-green-200 bg-green-100 text-green-700 dark:border-green-700 dark:bg-green-900/30 dark:text-green-400'
+                      : 'text-gray-700 hover:bg-gray-100/80 dark:text-gray-300 dark:hover:bg-gray-700/80'
+                  }`}
+                  aria-pressed={selectedPansouCloudTypes.length === 0}
+                >
+                  全部类型
+                </button>
+                {PANSOU_CLOUD_TYPE_OPTIONS.map(({ value, label }) => {
+                  const selected = selectedPansouCloudTypes.includes(value);
+                  return (
+                    <button
+                      key={value}
+                      type='button'
+                      onClick={() => togglePansouCloudType(value)}
+                      className={`rounded-lg px-2 py-1.5 text-left text-xs transition-all duration-200 ${
+                        selected
+                          ? 'border border-green-200 bg-green-100 text-green-700 dark:border-green-700 dark:bg-green-900/30 dark:text-green-400'
+                          : 'text-gray-700 hover:bg-gray-100/80 dark:text-gray-300 dark:hover:bg-gray-700/80'
+                      }`}
+                      aria-pressed={selected}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>,
+            document.body
+          )}
+
         {/* 搜索结果或搜索历史 */}
-        <div className='max-w-[95%] mx-auto mt-12 overflow-visible'>
+        <div
+          className={`max-w-[95%] mx-auto overflow-visible ${
+            activeTab === 'video' && !showResults
+              ? 'mt-2'
+              : activeTab === 'pansou'
+              ? 'mt-4'
+              : 'mt-12'
+          }`}
+        >
           {showResults ? (
             <section className='mb-12'>
               {activeTab === 'video' ? (
@@ -1592,59 +2062,58 @@ function SearchPageClient() {
                   {/* 标题 */}
                   <div className='mb-4 flex items-start justify-between gap-4'>
                     <div className='min-w-0'>
-                      <h2 className='text-xl font-bold text-gray-800 dark:text-gray-200'>
-                        搜索结果
-                        {isFromCache ? (
-                          <span className='ml-2 rounded-md bg-green-50 px-2 py-0.5 text-xs font-medium text-green-600 dark:bg-green-900/30 dark:text-green-400'>
-                            缓存
-                          </span>
-                        ) : (
-                          <>
-                            {totalSources > 0 && useFluidSearch && (
-                              <span className='ml-2 text-sm font-normal text-gray-500 dark:text-gray-400'>
-                                源 {completedSources}/{totalSources}
-                              </span>
-                            )}
-                            {isLoading && useFluidSearch && (
-                              <span className='ml-2 inline-block align-middle'>
-                                <span className='inline-block h-3 w-3 animate-spin rounded-full border-2 border-gray-300 border-t-green-500'></span>
-                              </span>
-                            )}
-                          </>
-                        )}
-                      </h2>
-                      <div className='mt-2 flex flex-wrap items-center gap-2 text-xs'>
-                        <span className='inline-flex items-center rounded-full bg-gray-100 px-2.5 py-1 font-medium text-gray-700 dark:bg-gray-800 dark:text-gray-200'>
-                          {resultCountMeta.modeLabel}{' '}
-                          {resultCountMeta.visibleCount.toLocaleString()}{' '}
-                          {resultCountMeta.unit}
+                      <h2 className='flex flex-wrap items-start gap-x-3 gap-y-1 text-xl font-bold text-gray-800 dark:text-gray-200'>
+                        <span className='inline-flex items-center gap-2'>
+                          搜索结果
+                          {isFromCache && (
+                            <span className='rounded-md bg-green-50 px-2 py-0.5 text-xs font-medium text-green-600 dark:bg-green-900/30 dark:text-green-400'>
+                              缓存
+                            </span>
+                          )}
                         </span>
-                        {resultCountMeta.isFiltered && (
-                          <span className='inline-flex items-center rounded-full bg-white/80 px-2.5 py-1 font-medium text-gray-500 ring-1 ring-gray-200 dark:bg-gray-900/70 dark:text-gray-400 dark:ring-gray-700'>
-                            筛选前{' '}
-                            {resultCountMeta.totalCount.toLocaleString()}{' '}
+                        <span className='flex flex-col text-xs font-medium leading-5 text-gray-500 dark:text-gray-400'>
+                          <span>
+                            {resultCountMeta.modeLabel}{' '}
+                            {resultCountMeta.visibleCount.toLocaleString()}{' '}
                             {resultCountMeta.unit}
+                            {resultCountMeta.isFiltered && (
+                              <span className='ml-1 text-gray-400 dark:text-gray-500'>
+                                / 筛选前{' '}
+                                {resultCountMeta.totalCount.toLocaleString()}{' '}
+                                {resultCountMeta.unit}
+                              </span>
+                            )}
                           </span>
-                        )}
-                      </div>
+                          {!isFromCache && totalSources > 0 && useFluidSearch && (
+                            <span className='inline-flex items-center gap-1'>
+                              源 {completedSources}/{totalSources}
+                              {isLoading && (
+                                <span className='inline-block h-3 w-3 animate-spin rounded-full border-2 border-gray-300 border-t-green-500'></span>
+                              )}
+                            </span>
+                          )}
+                        </span>
+                      </h2>
                     </div>
-                    {searchQuery && (
-                      <button
-                        onClick={() => {
-                          setForceRefresh(true);
-                        }}
-                        disabled={isLoading}
-                        className='flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-gray-600 transition-colors hover:bg-green-50 hover:text-green-600 disabled:cursor-not-allowed disabled:opacity-50 dark:text-gray-400 dark:hover:bg-gray-700/50 dark:hover:text-green-400'
-                        aria-label='强制刷新搜索结果'
-                      >
-                        <RefreshCw
-                          className={`h-4 w-4 ${
-                            isLoading ? 'animate-spin' : ''
-                          }`}
-                        />
-                        <span>刷新</span>
-                      </button>
-                    )}
+                    <div className='flex shrink-0 items-center gap-2'>
+                      {searchQuery && (
+                        <button
+                          onClick={() => {
+                            setForceRefresh(true);
+                          }}
+                          disabled={isLoading}
+                          className='flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-gray-600 transition-colors hover:bg-green-50 hover:text-green-600 disabled:cursor-not-allowed disabled:opacity-50 dark:text-gray-400 dark:hover:bg-gray-700/50 dark:hover:text-green-400'
+                          aria-label='强制刷新搜索结果'
+                        >
+                          <RefreshCw
+                            className={`h-4 w-4 ${
+                              isLoading ? 'animate-spin' : ''
+                            }`}
+                          />
+                          <span>刷新</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
                   <div className='mb-4 flex items-center gap-3'>
                     <div className='min-w-0 flex-1'>
@@ -1662,54 +2131,105 @@ function SearchPageClient() {
                         />
                       )}
                     </div>
-                    <div className='flex shrink-0 items-center justify-end self-center'>
-                      <label className='flex shrink-0 cursor-pointer select-none items-center gap-2'>
-                        <span className='text-xs text-gray-700 dark:text-gray-300 sm:text-sm'>
-                          聚合
-                        </span>
-                        <div className='relative'>
-                          <input
-                            type='checkbox'
-                            className='peer sr-only'
-                            checked={viewMode === 'agg'}
-                            onChange={() =>
-                              setViewMode(viewMode === 'agg' ? 'all' : 'agg')
-                            }
-                          />
-                          <div className='h-5 w-9 rounded-full bg-gray-300 transition-colors peer-checked:bg-green-500 dark:bg-gray-600'></div>
-                          <div className='absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white transition-transform peer-checked:translate-x-4'></div>
+                    <div className='relative flex shrink-0 items-center justify-end self-center'>
+                      <button
+                        ref={(el) => {
+                          if (el) advancedButtonRefs.current[1] = el;
+                        }}
+                        type='button'
+                        onClick={() => setAdvancedOpen((prev) => !prev)}
+                        className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm transition-colors ${
+                          advancedOpen
+                            ? 'bg-green-50 text-green-600 dark:bg-gray-700/70 dark:text-green-400'
+                            : 'text-gray-600 hover:bg-green-50 hover:text-green-600 dark:text-gray-400 dark:hover:bg-gray-700/50 dark:hover:text-green-400'
+                        }`}
+                        aria-expanded={advancedOpen}
+                      >
+                        <span>高级</span>
+                        <ChevronUp
+                          className={`h-4 w-4 transition-transform ${
+                            advancedOpen ? '' : 'rotate-180'
+                          }`}
+                        />
+                      </button>
+                      {advancedOpen && (
+                        <div
+                          ref={(el) => {
+                            if (el) advancedDropdownRefs.current[1] = el;
+                          }}
+                          className='absolute right-0 top-full z-[70] mt-2 w-56 rounded-xl border border-gray-200 bg-white p-3 shadow-lg dark:border-gray-700 dark:bg-gray-900'
+                        >
+                          <label className='flex cursor-pointer select-none items-center justify-between gap-3 rounded-lg px-1 py-2'>
+                            <span className='text-sm text-gray-700 dark:text-gray-300'>
+                              聚合
+                            </span>
+                            <div className='relative'>
+                              <input
+                                type='checkbox'
+                                className='peer sr-only'
+                                checked={viewMode === 'agg'}
+                                onChange={() =>
+                                  setViewMode(viewMode === 'agg' ? 'all' : 'agg')
+                                }
+                              />
+                              <div className='h-5 w-9 rounded-full bg-gray-300 transition-colors peer-checked:bg-green-500 dark:bg-gray-600'></div>
+                              <div className='absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white transition-transform peer-checked:translate-x-4'></div>
+                            </div>
+                          </label>
+                          {privateLibrarySearchEnabled && (
+                            <label className='flex cursor-pointer select-none items-center justify-between gap-3 rounded-lg px-1 py-2'>
+                              <span className='text-sm text-gray-700 dark:text-gray-300'>
+                                只搜私人影库
+                              </span>
+                              <div className='relative'>
+                                <input
+                                  type='checkbox'
+                                  className='peer sr-only'
+                                  checked={privateLibraryOnly}
+                                  onChange={(e) =>
+                                    setPrivateLibraryOnly(e.target.checked)
+                                  }
+                                />
+                                <div className='h-5 w-9 rounded-full bg-gray-300 transition-colors peer-checked:bg-green-500 dark:bg-gray-600'></div>
+                                <div className='absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white transition-transform peer-checked:translate-x-4'></div>
+                              </div>
+                            </label>
+                          )}
+                          <div className='mt-2 border-t border-gray-200 pt-2 dark:border-gray-700'>
+                            <span className='px-1 text-sm text-gray-700 dark:text-gray-300'>
+                              显示方式
+                            </span>
+                            <div className='mt-2 grid grid-cols-2 gap-1 rounded-lg bg-gray-100 p-1 dark:bg-gray-800'>
+                              <button
+                                type='button'
+                                onClick={() => setResultDisplayMode('card')}
+                                className={`inline-flex items-center justify-center gap-1 rounded-md px-2 py-1.5 text-sm transition-colors ${
+                                  resultDisplayMode === 'card'
+                                    ? 'bg-green-500 text-white'
+                                    : 'text-gray-600 hover:bg-white dark:text-gray-300 dark:hover:bg-gray-700'
+                                }`}
+                                aria-label='切换为卡片视图'
+                              >
+                                <Grid2x2 className='h-4 w-4' />
+                                <span>卡片</span>
+                              </button>
+                              <button
+                                type='button'
+                                onClick={() => setResultDisplayMode('list')}
+                                className={`inline-flex items-center justify-center gap-1 rounded-md px-2 py-1.5 text-sm transition-colors ${
+                                  resultDisplayMode === 'list'
+                                    ? 'bg-green-500 text-white'
+                                    : 'text-gray-600 hover:bg-white dark:text-gray-300 dark:hover:bg-gray-700'
+                                }`}
+                                aria-label='切换为列表视图'
+                              >
+                                <List className='h-4 w-4' />
+                                <span>列表</span>
+                              </button>
+                            </div>
+                          </div>
                         </div>
-                      </label>
-                    </div>
-                  </div>
-                  <div className='mb-8 flex justify-center'>
-                    <div className='inline-flex items-center rounded-xl border border-gray-200 bg-white p-1 shadow-sm dark:border-gray-700 dark:bg-gray-900'>
-                      <button
-                        type='button'
-                        onClick={() => setResultDisplayMode('card')}
-                        className={`inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm transition-colors ${
-                          resultDisplayMode === 'card'
-                            ? 'bg-green-500 text-white'
-                            : 'text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800'
-                        }`}
-                        aria-label='切换为卡片视图'
-                      >
-                        <Grid2x2 className='h-4 w-4' />
-                        <span>卡片</span>
-                      </button>
-                      <button
-                        type='button'
-                        onClick={() => setResultDisplayMode('list')}
-                        className={`inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm transition-colors ${
-                          resultDisplayMode === 'list'
-                            ? 'bg-green-500 text-white'
-                            : 'text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800'
-                        }`}
-                        aria-label='切换为列表视图'
-                      >
-                        <List className='h-4 w-4' />
-                        <span>列表</span>
-                      </button>
+                      )}
                     </div>
                   </div>
                   {searchResults.length === 0 ? (
@@ -1792,6 +2312,9 @@ function SearchPageClient() {
                                   <VideoCard
                                     ref={getGroupRef(mapKey)}
                                     from='search'
+                                    onBeforeNavigate={
+                                      savePartialCacheForPlayback
+                                    }
                                     isAggregate={true}
                                     title={title}
                                     poster={poster}
@@ -1805,6 +2328,14 @@ function SearchPageClient() {
                                         : ''
                                     }
                                     type={type}
+                                    isAnime={group.some((g) =>
+                                      isAnimeCategoryText(g.type_name, g.class)
+                                    )}
+                                    typeName={
+                                      group.find((g) => g.type_name || g.class)
+                                        ?.type_name ||
+                                      group.find((g) => g.class)?.class
+                                    }
                                   />
                                 </div>
                               );
@@ -1812,6 +2343,10 @@ function SearchPageClient() {
                           : filteredAllResults.map((item) => {
                               const type =
                                 item.episodes.length > 1 ? 'tv' : 'movie';
+                              const itemIsAnime = isAnimeCategoryText(
+                                item.type_name,
+                                item.class
+                              );
 
                               if (resultDisplayMode === 'list') {
                                 return renderListItem({
@@ -1841,6 +2376,9 @@ function SearchPageClient() {
                                 >
                                   <VideoCard
                                     id={item.id}
+                                    onBeforeNavigate={
+                                      savePartialCacheForPlayback
+                                    }
                                     title={item.title}
                                     poster={item.poster}
                                     episodes={item.episodes.length}
@@ -1855,6 +2393,8 @@ function SearchPageClient() {
                                     year={item.year}
                                     from='search'
                                     type={type}
+                                    isAnime={itemIsAnime}
+                                    typeName={item.type_name || item.class}
                                   />
                                 </div>
                               );
@@ -1897,6 +2437,7 @@ function SearchPageClient() {
                   <PansouSearch
                     keyword={searchQuery}
                     triggerSearch={triggerPansouSearch}
+                    cloudTypes={selectedPansouCloudTypes}
                   />
                 </>
               ) : (
@@ -1910,6 +2451,7 @@ function SearchPageClient() {
                   <AcgSearch
                     keyword={searchQuery}
                     triggerSearch={triggerAcgSearch}
+                    showSourceSwitch={false}
                   />
                 </>
               )}

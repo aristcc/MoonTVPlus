@@ -14,12 +14,19 @@ import {
   DanmakuFilterConfig,
   Notification,
   MovieRequest,
+  PushSubscriptionRecord,
 } from './types';
 import { AdminConfig } from './admin.types';
 import { MangaReadRecord, MangaShelfItem } from './manga.types';
+import { BookReadRecord, BookShelfItem } from './book.types';
 import { DatabaseAdapter } from './d1-adapter';
-import { MusicV2HistoryRecord, MusicV2PlaylistItem, MusicV2PlaylistRecord } from './music-v2';
+import {
+  MusicV2HistoryRecord,
+  MusicV2PlaylistItem,
+  MusicV2PlaylistRecord,
+} from './music-v2';
 import { userInfoCache } from './user-cache';
+import { dispatchNotificationChannels } from './notification-dispatch';
 
 /**
  * Cloudflare D1 存储实现
@@ -57,8 +64,15 @@ export class D1Storage implements IStorage {
     for (const statement of statements) {
       try {
         const result = await this.db.prepare(statement).run();
-        if (!result.success && result.error && !/duplicate column|already exists/i.test(result.error)) {
-          console.warn('D1Storage.ensureMangaShelfColumns warning:', result.error);
+        if (
+          !result.success &&
+          result.error &&
+          !/duplicate column|already exists/i.test(result.error)
+        ) {
+          console.warn(
+            'D1Storage.ensureMangaShelfColumns warning:',
+            result.error
+          );
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -69,9 +83,13 @@ export class D1Storage implements IStorage {
     }
   }
 
+
   // ==================== 播放记录 ====================
 
-  async getPlayRecord(userName: string, key: string): Promise<PlayRecord | null> {
+  async getPlayRecord(
+    userName: string,
+    key: string
+  ): Promise<PlayRecord | null> {
     try {
       const result = await this.db
         .prepare('SELECT * FROM play_records WHERE username = ? AND key = ?')
@@ -86,16 +104,21 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async setPlayRecord(userName: string, key: string, record: PlayRecord): Promise<void> {
+  async setPlayRecord(
+    userName: string,
+    key: string,
+    record: PlayRecord
+  ): Promise<void> {
     try {
       await this.db
-        .prepare(`
+        .prepare(
+          `
           INSERT INTO play_records (
             username, key, title, source_name, cover, year,
             episode_index, total_episodes, play_time, total_time,
-            save_time, search_title, new_episodes
+            save_time, search_title, new_episodes, is_anime
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(username, key) DO UPDATE SET
             title = excluded.title,
             source_name = excluded.source_name,
@@ -107,8 +130,10 @@ export class D1Storage implements IStorage {
             total_time = excluded.total_time,
             save_time = excluded.save_time,
             search_title = excluded.search_title,
-            new_episodes = excluded.new_episodes
-        `)
+            new_episodes = excluded.new_episodes,
+            is_anime = excluded.is_anime
+        `
+        )
         .bind(
           userName,
           key,
@@ -122,7 +147,8 @@ export class D1Storage implements IStorage {
           record.total_time,
           record.save_time,
           record.search_title || '',
-          record.new_episodes || null
+          record.new_episodes || null,
+          record.is_anime ? 1 : 0
         )
         .run();
     } catch (err) {
@@ -131,10 +157,14 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async getAllPlayRecords(userName: string): Promise<{ [key: string]: PlayRecord }> {
+  async getAllPlayRecords(
+    userName: string
+  ): Promise<{ [key: string]: PlayRecord }> {
     try {
       const results = await this.db
-        .prepare('SELECT * FROM play_records WHERE username = ? ORDER BY save_time DESC')
+        .prepare(
+          'SELECT * FROM play_records WHERE username = ? ORDER BY save_time DESC'
+        )
         .bind(userName)
         .all();
 
@@ -164,14 +194,37 @@ export class D1Storage implements IStorage {
     }
   }
 
+  async deletePlayRecords(userName: string, keys: string[]): Promise<void> {
+    const uniqueKeys = Array.from(new Set(keys)).filter(Boolean);
+    if (uniqueKeys.length === 0) return;
+
+    try {
+      const placeholders = uniqueKeys.map(() => '?').join(',');
+      await this.db
+        .prepare(
+          `DELETE FROM play_records WHERE username = ? AND key IN (${placeholders})`
+        )
+        .bind(userName, ...uniqueKeys)
+        .run();
+    } catch (err) {
+      console.error('D1Storage.deletePlayRecords error:', err);
+      throw err;
+    }
+  }
+
   async cleanupOldPlayRecords(userName: string): Promise<void> {
     try {
-      const maxRecords = parseInt(process.env.MAX_PLAY_RECORDS_PER_USER || '100', 10);
+      const maxRecords = parseInt(
+        process.env.MAX_PLAY_RECORDS_PER_USER || '100',
+        10
+      );
       const threshold = maxRecords + 10;
 
       // 检查记录数量
       const countResult = await this.db
-        .prepare('SELECT COUNT(*) as count FROM play_records WHERE username = ?')
+        .prepare(
+          'SELECT COUNT(*) as count FROM play_records WHERE username = ?'
+        )
         .bind(userName)
         .first();
 
@@ -180,7 +233,8 @@ export class D1Storage implements IStorage {
 
       // 删除超出限制的旧记录
       await this.db
-        .prepare(`
+        .prepare(
+          `
           DELETE FROM play_records
           WHERE username = ?
           AND key NOT IN (
@@ -189,11 +243,14 @@ export class D1Storage implements IStorage {
             ORDER BY save_time DESC
             LIMIT ?
           )
-        `)
+        `
+        )
         .bind(userName, userName, maxRecords)
         .run();
 
-      console.log(`D1Storage: Cleaned up old play records for user ${userName}`);
+      console.log(
+        `D1Storage: Cleaned up old play records for user ${userName}`
+      );
     } catch (err) {
       console.error('D1Storage.cleanupOldPlayRecords error:', err);
       throw err;
@@ -233,10 +290,15 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async setFavorite(userName: string, key: string, favorite: Favorite): Promise<void> {
+  async setFavorite(
+    userName: string,
+    key: string,
+    favorite: Favorite
+  ): Promise<void> {
     try {
       await this.db
-        .prepare(`
+        .prepare(
+          `
           INSERT INTO favorites (
             username, key, source_name, total_episodes, title,
             year, cover, save_time, search_title, origin,
@@ -254,7 +316,8 @@ export class D1Storage implements IStorage {
             origin = excluded.origin,
             is_completed = excluded.is_completed,
             vod_remarks = excluded.vod_remarks
-        `)
+        `
+        )
         .bind(
           userName,
           key,
@@ -276,10 +339,14 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async getAllFavorites(userName: string): Promise<{ [key: string]: Favorite }> {
+  async getAllFavorites(
+    userName: string
+  ): Promise<{ [key: string]: Favorite }> {
     try {
       const results = await this.db
-        .prepare('SELECT * FROM favorites WHERE username = ? ORDER BY save_time DESC')
+        .prepare(
+          'SELECT * FROM favorites WHERE username = ? ORDER BY save_time DESC'
+        )
         .bind(userName)
         .all();
 
@@ -329,7 +396,9 @@ export class D1Storage implements IStorage {
   async getMusicPlayRecord(userName: string, key: string): Promise<any | null> {
     try {
       const result = await this.db
-        .prepare('SELECT * FROM music_play_records WHERE username = ? AND key = ?')
+        .prepare(
+          'SELECT * FROM music_play_records WHERE username = ? AND key = ?'
+        )
         .bind(userName, key)
         .first();
 
@@ -352,10 +421,15 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async setMusicPlayRecord(userName: string, key: string, record: any): Promise<void> {
+  async setMusicPlayRecord(
+    userName: string,
+    key: string,
+    record: any
+  ): Promise<void> {
     try {
       await this.db
-        .prepare(`
+        .prepare(
+          `
           INSERT INTO music_play_records (username, key, platform, song_id, name, artist, album, pic, play_time, duration, save_time)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(username, key) DO UPDATE SET
@@ -366,7 +440,8 @@ export class D1Storage implements IStorage {
             play_time = excluded.play_time,
             duration = excluded.duration,
             save_time = excluded.save_time
-        `)
+        `
+        )
         .bind(
           userName,
           key,
@@ -387,15 +462,18 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async batchSetMusicPlayRecords(userName: string, records: { key: string; record: any }[]): Promise<void> {
+  async batchSetMusicPlayRecords(
+    userName: string,
+    records: { key: string; record: any }[]
+  ): Promise<void> {
     if (records.length === 0) return;
     if (!this.db) return;
 
     try {
       // 使用批量插入，D1 支持 batch 操作
       const statements = records.map(({ key, record }) =>
-        this.db!
-          .prepare(`
+        this.db!.prepare(
+          `
             INSERT INTO music_play_records (username, key, platform, song_id, name, artist, album, pic, play_time, duration, save_time)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(username, key) DO UPDATE SET
@@ -408,20 +486,20 @@ export class D1Storage implements IStorage {
               play_time = excluded.play_time,
               duration = excluded.duration,
               save_time = excluded.save_time
-          `)
-          .bind(
-            userName,
-            key,
-            record.platform,
-            record.id,
-            record.name,
-            record.artist,
-            record.album || null,
-            record.pic || null,
-            record.play_time,
-            record.duration,
-            record.save_time
-          )
+          `
+        ).bind(
+          userName,
+          key,
+          record.platform,
+          record.id,
+          record.name,
+          record.artist,
+          record.album || null,
+          record.pic || null,
+          record.play_time,
+          record.duration,
+          record.save_time
+        )
       );
 
       if (this.db.batch) {
@@ -433,10 +511,14 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async getAllMusicPlayRecords(userName: string): Promise<{ [key: string]: any }> {
+  async getAllMusicPlayRecords(
+    userName: string
+  ): Promise<{ [key: string]: any }> {
     try {
       const results = await this.db
-        .prepare('SELECT * FROM music_play_records WHERE username = ? ORDER BY save_time DESC')
+        .prepare(
+          'SELECT * FROM music_play_records WHERE username = ? ORDER BY save_time DESC'
+        )
         .bind(userName)
         .all();
 
@@ -466,7 +548,9 @@ export class D1Storage implements IStorage {
   async deleteMusicPlayRecord(userName: string, key: string): Promise<void> {
     try {
       await this.db
-        .prepare('DELETE FROM music_play_records WHERE username = ? AND key = ?')
+        .prepare(
+          'DELETE FROM music_play_records WHERE username = ? AND key = ?'
+        )
         .bind(userName, key)
         .run();
     } catch (err) {
@@ -489,19 +573,24 @@ export class D1Storage implements IStorage {
 
   // ==================== 音乐歌单相关 ====================
 
-  async createMusicPlaylist(userName: string, playlist: {
-    id: string;
-    name: string;
-    description?: string;
-    cover?: string;
-  }): Promise<void> {
+  async createMusicPlaylist(
+    userName: string,
+    playlist: {
+      id: string;
+      name: string;
+      description?: string;
+      cover?: string;
+    }
+  ): Promise<void> {
     try {
       const now = Date.now();
       await this.db
-        .prepare(`
+        .prepare(
+          `
           INSERT INTO music_playlists (id, username, name, description, cover, created_at, updated_at)
           VALUES (?, ?, ?, ?, ?, ?, ?)
-        `)
+        `
+        )
         .bind(
           playlist.id,
           userName,
@@ -545,7 +634,9 @@ export class D1Storage implements IStorage {
   async getUserMusicPlaylists(userName: string): Promise<any[]> {
     try {
       const results = await this.db
-        .prepare('SELECT * FROM music_playlists WHERE username = ? ORDER BY created_at DESC')
+        .prepare(
+          'SELECT * FROM music_playlists WHERE username = ? ORDER BY created_at DESC'
+        )
         .bind(userName)
         .all();
 
@@ -566,11 +657,14 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async updateMusicPlaylist(playlistId: string, updates: {
-    name?: string;
-    description?: string;
-    cover?: string;
-  }): Promise<void> {
+  async updateMusicPlaylist(
+    playlistId: string,
+    updates: {
+      name?: string;
+      description?: string;
+      cover?: string;
+    }
+  ): Promise<void> {
     try {
       const fields: string[] = [];
       const values: any[] = [];
@@ -617,28 +711,34 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async addSongToPlaylist(playlistId: string, song: {
-    platform: string;
-    id: string;
-    name: string;
-    artist: string;
-    album?: string;
-    pic?: string;
-    duration: number;
-  }): Promise<void> {
+  async addSongToPlaylist(
+    playlistId: string,
+    song: {
+      platform: string;
+      id: string;
+      name: string;
+      artist: string;
+      album?: string;
+      pic?: string;
+      duration: number;
+    }
+  ): Promise<void> {
     try {
       const now = Date.now();
 
       // 获取当前最大的 sort_order
       const maxOrderResult = await this.db
-        .prepare('SELECT MAX(sort_order) as max_order FROM music_playlist_songs WHERE playlist_id = ?')
+        .prepare(
+          'SELECT MAX(sort_order) as max_order FROM music_playlist_songs WHERE playlist_id = ?'
+        )
         .bind(playlistId)
         .first();
 
-      const nextOrder = (maxOrderResult?.max_order as number || 0) + 1;
+      const nextOrder = ((maxOrderResult?.max_order as number) || 0) + 1;
 
       await this.db
-        .prepare(`
+        .prepare(
+          `
           INSERT INTO music_playlist_songs (
             playlist_id, platform, song_id, name, artist, album, pic, duration, added_at, sort_order
           )
@@ -649,7 +749,8 @@ export class D1Storage implements IStorage {
             album = excluded.album,
             pic = excluded.pic,
             duration = excluded.duration
-        `)
+        `
+        )
         .bind(
           playlistId,
           song.platform,
@@ -666,7 +767,9 @@ export class D1Storage implements IStorage {
 
       // 更新歌单的 updated_at 和封面（如果是第一首歌）
       const songCount = await this.db
-        .prepare('SELECT COUNT(*) as count FROM music_playlist_songs WHERE playlist_id = ?')
+        .prepare(
+          'SELECT COUNT(*) as count FROM music_playlist_songs WHERE playlist_id = ?'
+        )
         .bind(playlistId)
         .first();
 
@@ -684,10 +787,16 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async removeSongFromPlaylist(playlistId: string, platform: string, songId: string): Promise<void> {
+  async removeSongFromPlaylist(
+    playlistId: string,
+    platform: string,
+    songId: string
+  ): Promise<void> {
     try {
       await this.db
-        .prepare('DELETE FROM music_playlist_songs WHERE playlist_id = ? AND platform = ? AND song_id = ?')
+        .prepare(
+          'DELETE FROM music_playlist_songs WHERE playlist_id = ? AND platform = ? AND song_id = ?'
+        )
         .bind(playlistId, platform, songId)
         .run();
 
@@ -705,7 +814,9 @@ export class D1Storage implements IStorage {
   async getPlaylistSongs(playlistId: string): Promise<any[]> {
     try {
       const results = await this.db
-        .prepare('SELECT * FROM music_playlist_songs WHERE playlist_id = ? ORDER BY sort_order ASC')
+        .prepare(
+          'SELECT * FROM music_playlist_songs WHERE playlist_id = ? ORDER BY sort_order ASC'
+        )
         .bind(playlistId)
         .all();
 
@@ -728,10 +839,16 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async isSongInPlaylist(playlistId: string, platform: string, songId: string): Promise<boolean> {
+  async isSongInPlaylist(
+    playlistId: string,
+    platform: string,
+    songId: string
+  ): Promise<boolean> {
     try {
       const result = await this.db
-        .prepare('SELECT 1 FROM music_playlist_songs WHERE playlist_id = ? AND platform = ? AND song_id = ? LIMIT 1')
+        .prepare(
+          'SELECT 1 FROM music_playlist_songs WHERE playlist_id = ? AND platform = ? AND song_id = ? LIMIT 1'
+        )
         .bind(playlistId, platform, songId)
         .first();
 
@@ -747,7 +864,10 @@ export class D1Storage implements IStorage {
   async listMusicV2History(userName: string): Promise<MusicV2HistoryRecord[]> {
     try {
       const results = await this.db
-        .prepare('SELECT * FROM music_v2_history WHERE username = ? ORDER BY last_played_at DESC')
+        // 按队列顺序返回；当前播放项由最大 last_played_at 决定
+        .prepare(
+          'SELECT * FROM music_v2_history WHERE username = ? ORDER BY created_at ASC, id ASC'
+        )
         .bind(userName)
         .all();
 
@@ -776,10 +896,14 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async upsertMusicV2History(userName: string, record: MusicV2HistoryRecord): Promise<void> {
+  async upsertMusicV2History(
+    userName: string,
+    record: MusicV2HistoryRecord
+  ): Promise<void> {
     try {
       await this.db
-        .prepare(`
+        .prepare(
+          `
           INSERT INTO music_v2_history (
             username, song_id, source, songmid, name, artist, album, cover, duration_text, duration_sec,
             play_progress_sec, last_played_at, play_count, last_quality, created_at, updated_at
@@ -799,7 +923,8 @@ export class D1Storage implements IStorage {
             play_count = excluded.play_count,
             last_quality = excluded.last_quality,
             updated_at = excluded.updated_at
-        `)
+        `
+        )
         .bind(
           userName,
           record.songId,
@@ -825,7 +950,10 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async batchUpsertMusicV2History(userName: string, records: MusicV2HistoryRecord[]): Promise<void> {
+  async batchUpsertMusicV2History(
+    userName: string,
+    records: MusicV2HistoryRecord[]
+  ): Promise<void> {
     for (const record of records) {
       await this.upsertMusicV2History(userName, record);
     }
@@ -833,7 +961,9 @@ export class D1Storage implements IStorage {
 
   async deleteMusicV2History(userName: string, songId: string): Promise<void> {
     await this.db
-      .prepare('DELETE FROM music_v2_history WHERE username = ? AND song_id = ?')
+      .prepare(
+        'DELETE FROM music_v2_history WHERE username = ? AND song_id = ?'
+      )
       .bind(userName, songId)
       .run();
   }
@@ -847,23 +977,39 @@ export class D1Storage implements IStorage {
 
   // ==================== Music V2 歌单相关 ====================
 
-  async createMusicV2Playlist(userName: string, playlist: {
-    id: string;
-    name: string;
-    description?: string;
-    cover?: string;
-  }): Promise<void> {
+  async createMusicV2Playlist(
+    userName: string,
+    playlist: {
+      id: string;
+      name: string;
+      description?: string;
+      cover?: string;
+    }
+  ): Promise<void> {
     const now = Date.now();
     await this.db
-      .prepare(`
+      .prepare(
+        `
         INSERT INTO music_v2_playlists (id, username, name, description, cover, song_count, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `)
-      .bind(playlist.id, userName, playlist.name, playlist.description || null, playlist.cover || null, 0, now, now)
+      `
+      )
+      .bind(
+        playlist.id,
+        userName,
+        playlist.name,
+        playlist.description || null,
+        playlist.cover || null,
+        0,
+        now,
+        now
+      )
       .run();
   }
 
-  async getMusicV2Playlist(playlistId: string): Promise<MusicV2PlaylistRecord | null> {
+  async getMusicV2Playlist(
+    playlistId: string
+  ): Promise<MusicV2PlaylistRecord | null> {
     const row: any = await this.db
       .prepare('SELECT * FROM music_v2_playlists WHERE id = ?')
       .bind(playlistId)
@@ -883,9 +1029,13 @@ export class D1Storage implements IStorage {
     };
   }
 
-  async listMusicV2Playlists(userName: string): Promise<MusicV2PlaylistRecord[]> {
+  async listMusicV2Playlists(
+    userName: string
+  ): Promise<MusicV2PlaylistRecord[]> {
     const results = await this.db
-      .prepare('SELECT * FROM music_v2_playlists WHERE username = ? ORDER BY updated_at DESC')
+      .prepare(
+        'SELECT * FROM music_v2_playlists WHERE username = ? ORDER BY updated_at DESC'
+      )
       .bind(userName)
       .all();
 
@@ -903,12 +1053,15 @@ export class D1Storage implements IStorage {
     }));
   }
 
-  async updateMusicV2Playlist(playlistId: string, updates: {
-    name?: string;
-    description?: string;
-    cover?: string;
-    song_count?: number;
-  }): Promise<void> {
+  async updateMusicV2Playlist(
+    playlistId: string,
+    updates: {
+      name?: string;
+      description?: string;
+      cover?: string;
+      song_count?: number;
+    }
+  ): Promise<void> {
     const fields: string[] = [];
     const values: any[] = [];
 
@@ -934,7 +1087,9 @@ export class D1Storage implements IStorage {
     values.push(playlistId);
 
     await this.db
-      .prepare(`UPDATE music_v2_playlists SET ${fields.join(', ')} WHERE id = ?`)
+      .prepare(
+        `UPDATE music_v2_playlists SET ${fields.join(', ')} WHERE id = ?`
+      )
       .bind(...values)
       .run();
   }
@@ -946,21 +1101,30 @@ export class D1Storage implements IStorage {
       .run();
   }
 
-  async addMusicV2PlaylistItem(playlistId: string, item: MusicV2PlaylistItem): Promise<void> {
+  async addMusicV2PlaylistItem(
+    playlistId: string,
+    item: MusicV2PlaylistItem
+  ): Promise<void> {
     const playlist = await this.getMusicV2Playlist(playlistId);
     if (!playlist) {
       throw new Error('歌单不存在');
     }
 
     const maxOrder: any = await this.db
-      .prepare('SELECT MAX(sort_order) as max_order FROM music_v2_playlist_items WHERE playlist_id = ?')
+      .prepare(
+        'SELECT MAX(sort_order) as max_order FROM music_v2_playlist_items WHERE playlist_id = ?'
+      )
       .bind(playlistId)
       .first();
-    const nextOrder = Math.max(item.sortOrder || 0, (maxOrder?.max_order as number || 0) + 1);
+    const nextOrder = Math.max(
+      item.sortOrder || 0,
+      ((maxOrder?.max_order as number) || 0) + 1
+    );
     const now = Date.now();
 
     await this.db
-      .prepare(`
+      .prepare(
+        `
         INSERT INTO music_v2_playlist_items (
           playlist_id, username, song_id, source, songmid, name, artist, album, cover, duration_text, duration_sec, sort_order, added_at, updated_at
         )
@@ -975,7 +1139,8 @@ export class D1Storage implements IStorage {
           duration_text = excluded.duration_text,
           duration_sec = excluded.duration_sec,
           updated_at = excluded.updated_at
-      `)
+      `
+      )
       .bind(
         playlistId,
         playlist.username,
@@ -1001,9 +1166,14 @@ export class D1Storage implements IStorage {
     });
   }
 
-  async removeMusicV2PlaylistItem(playlistId: string, songId: string): Promise<void> {
+  async removeMusicV2PlaylistItem(
+    playlistId: string,
+    songId: string
+  ): Promise<void> {
     await this.db
-      .prepare('DELETE FROM music_v2_playlist_items WHERE playlist_id = ? AND song_id = ?')
+      .prepare(
+        'DELETE FROM music_v2_playlist_items WHERE playlist_id = ? AND song_id = ?'
+      )
       .bind(playlistId, songId)
       .run();
 
@@ -1014,9 +1184,13 @@ export class D1Storage implements IStorage {
     });
   }
 
-  async listMusicV2PlaylistItems(playlistId: string): Promise<MusicV2PlaylistItem[]> {
+  async listMusicV2PlaylistItems(
+    playlistId: string
+  ): Promise<MusicV2PlaylistItem[]> {
     const results = await this.db
-      .prepare('SELECT * FROM music_v2_playlist_items WHERE playlist_id = ? ORDER BY sort_order ASC, added_at ASC')
+      .prepare(
+        'SELECT * FROM music_v2_playlist_items WHERE playlist_id = ? ORDER BY sort_order ASC, added_at ASC'
+      )
       .bind(playlistId)
       .all();
 
@@ -1039,9 +1213,14 @@ export class D1Storage implements IStorage {
     }));
   }
 
-  async hasMusicV2PlaylistItem(playlistId: string, songId: string): Promise<boolean> {
+  async hasMusicV2PlaylistItem(
+    playlistId: string,
+    songId: string
+  ): Promise<boolean> {
     const row = await this.db
-      .prepare('SELECT 1 FROM music_v2_playlist_items WHERE playlist_id = ? AND song_id = ? LIMIT 1')
+      .prepare(
+        'SELECT 1 FROM music_v2_playlist_items WHERE playlist_id = ? AND song_id = ? LIMIT 1'
+      )
       .bind(playlistId, songId)
       .first();
     return row !== null;
@@ -1062,6 +1241,7 @@ export class D1Storage implements IStorage {
       save_time: row.save_time,
       search_title: row.search_title || '',
       new_episodes: row.new_episodes || undefined,
+      is_anime: row.is_anime === 1 || row.is_anime === true,
     };
   }
 
@@ -1094,12 +1274,17 @@ export class D1Storage implements IStorage {
   async verifyUser(userName: string, password: string): Promise<boolean> {
     try {
       // 检查是否是环境变量中的管理员
-      if (userName === process.env.USERNAME && password === process.env.PASSWORD) {
+      if (
+        userName === process.env.USERNAME &&
+        password === process.env.PASSWORD
+      ) {
         return true;
       }
 
       const user = await this.db
-        .prepare('SELECT password_hash FROM users WHERE username = ? AND banned = 0')
+        .prepare(
+          'SELECT password_hash FROM users WHERE username = ? AND banned = 0'
+        )
         .bind(userName)
         .first();
 
@@ -1194,12 +1379,16 @@ export class D1Storage implements IStorage {
           banned: user.banned === 1,
           tags: user.tags ? JSON.parse(user.tags as string) : undefined,
           oidcSub: user.oidc_sub as string | undefined,
-          enabledApis: user.enabled_apis ? JSON.parse(user.enabled_apis as string) : undefined,
+          enabledApis: user.enabled_apis
+            ? JSON.parse(user.enabled_apis as string)
+            : undefined,
           created_at: user.created_at as number,
           playrecord_migrated: user.playrecord_migrated === 1,
           favorite_migrated: user.favorite_migrated === 1,
           skip_migrated: user.skip_migrated === 1,
-          last_movie_request_time: user.last_movie_request_time as number | undefined,
+          last_movie_request_time: user.last_movie_request_time as
+            | number
+            | undefined,
           email: user.email as string | undefined,
           emailNotifications: user.email_notifications === 1,
         };
@@ -1230,13 +1419,15 @@ export class D1Storage implements IStorage {
         // 为站长创建数据库记录
         try {
           await this.db
-            .prepare(`
+            .prepare(
+              `
               INSERT INTO users (
                 username, password_hash, role, banned, created_at,
                 playrecord_migrated, favorite_migrated, skip_migrated
               )
               VALUES (?, ?, ?, 0, ?, 1, 1, 1)
-            `)
+            `
+            )
             .bind(
               userName,
               '', // 站长不需要密码哈希
@@ -1274,14 +1465,16 @@ export class D1Storage implements IStorage {
       const passwordHash = await this.hashPassword(password);
 
       await this.db
-        .prepare(`
+        .prepare(
+          `
           INSERT INTO users (
             username, password_hash, role, banned, tags, oidc_sub,
             enabled_apis, created_at, playrecord_migrated,
             favorite_migrated, skip_migrated
           )
           VALUES (?, ?, ?, 0, ?, ?, ?, ?, 1, 1, 1)
-        `)
+        `
+        )
         .bind(
           userName,
           passwordHash,
@@ -1304,7 +1497,8 @@ export class D1Storage implements IStorage {
   async getUserListV2(
     offset = 0,
     limit = 20,
-    ownerUsername?: string
+    ownerUsername?: string,
+    search?: string
   ): Promise<{
     users: Array<{
       username: string;
@@ -1318,10 +1512,18 @@ export class D1Storage implements IStorage {
     total: number;
   }> {
     try {
+      const trimmedSearch = search?.trim() || '';
+      const searchPattern = `%${trimmedSearch}%`;
+
       // 获取总数
-      const countResult = await this.db
-        .prepare('SELECT COUNT(*) as total FROM users')
-        .first();
+      const countQuery = trimmedSearch
+        ? this.db
+            .prepare(
+              'SELECT COUNT(*) as total FROM users WHERE username LIKE ?'
+            )
+            .bind(searchPattern)
+        : this.db.prepare('SELECT COUNT(*) as total FROM users');
+      const countResult = await countQuery.first();
       let total = (countResult?.total as number) || 0;
 
       // 检查站长是否在数据库中
@@ -1331,8 +1533,11 @@ export class D1Storage implements IStorage {
         ownerInfo = await this.getUserInfoV2(ownerUsername);
         ownerInDatabase = !!ownerInfo && ownerInfo.created_at !== 0;
 
-        // 如果站长不在数据库中，总数+1
-        if (!ownerInDatabase) {
+        // 如果站长不在数据库中且匹配搜索条件，总数+1
+        if (
+          !ownerInDatabase &&
+          (!trimmedSearch || ownerUsername.includes(trimmedSearch))
+        ) {
           total += 1;
         }
       }
@@ -1341,7 +1546,11 @@ export class D1Storage implements IStorage {
       let actualOffset = offset;
       let actualLimit = limit;
 
-      if (ownerUsername && !ownerInDatabase) {
+      if (
+        ownerUsername &&
+        !ownerInDatabase &&
+        (!trimmedSearch || ownerUsername.includes(trimmedSearch))
+      ) {
         if (offset === 0) {
           // 第一页：只获取 limit-1 个用户，为站长留出位置
           actualLimit = limit - 1;
@@ -1352,20 +1561,38 @@ export class D1Storage implements IStorage {
       }
 
       // 获取用户列表（按创建时间降序）
-      const result = await this.db
-        .prepare(`
-          SELECT username, role, banned, tags, oidc_sub, enabled_apis, created_at
-          FROM users
-          ORDER BY created_at DESC
-          LIMIT ? OFFSET ?
-        `)
-        .bind(actualLimit, actualOffset)
-        .all();
+      const listQuery = trimmedSearch
+        ? this.db
+            .prepare(
+              `
+              SELECT username, role, banned, tags, oidc_sub, enabled_apis, created_at
+              FROM users
+              WHERE username LIKE ?
+              ORDER BY created_at DESC
+              LIMIT ? OFFSET ?
+            `
+            )
+            .bind(searchPattern, actualLimit, actualOffset)
+        : this.db
+            .prepare(
+              `
+              SELECT username, role, banned, tags, oidc_sub, enabled_apis, created_at
+              FROM users
+              ORDER BY created_at DESC
+              LIMIT ? OFFSET ?
+            `
+            )
+            .bind(actualLimit, actualOffset);
+      const result = await listQuery.all();
 
       const users = [];
 
       // 如果有站长且在第一页，确保站长始终在第一位
-      if (ownerUsername && offset === 0) {
+      if (
+        ownerUsername &&
+        offset === 0 &&
+        (!trimmedSearch || ownerUsername.includes(trimmedSearch))
+      ) {
         users.push({
           username: ownerUsername,
           role: 'owner' as const,
@@ -1391,7 +1618,9 @@ export class D1Storage implements IStorage {
             banned: user.banned === 1,
             tags: user.tags ? JSON.parse(user.tags as string) : undefined,
             oidcSub: user.oidc_sub as string | undefined,
-            enabledApis: user.enabled_apis ? JSON.parse(user.enabled_apis as string) : undefined,
+            enabledApis: user.enabled_apis
+              ? JSON.parse(user.enabled_apis as string)
+              : undefined,
             created_at: user.created_at as number,
           });
         }
@@ -1538,10 +1767,12 @@ export class D1Storage implements IStorage {
     try {
       // SQLite 不支持 JSON 查询，需要使用 LIKE
       const result = await this.db
-        .prepare(`
+        .prepare(
+          `
           SELECT username FROM users
           WHERE tags LIKE ?
-        `)
+        `
+        )
         .bind(`%"${tagName}"%`)
         .all();
 
@@ -1570,7 +1801,10 @@ export class D1Storage implements IStorage {
   }
 
   // 直接设置用户密码哈希（用于数据导入，不进行二次哈希）
-  async setUserPasswordHash(userName: string, passwordHash: string): Promise<void> {
+  async setUserPasswordHash(
+    userName: string,
+    passwordHash: string
+  ): Promise<void> {
     try {
       await this.db
         .prepare('UPDATE users SET password_hash = ? WHERE username = ?')
@@ -1595,14 +1829,16 @@ export class D1Storage implements IStorage {
   ): Promise<void> {
     try {
       await this.db
-        .prepare(`
+        .prepare(
+          `
           INSERT INTO users (
             username, password_hash, role, banned, tags, oidc_sub,
             enabled_apis, created_at, playrecord_migrated,
             favorite_migrated, skip_migrated
           )
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 1)
-        `)
+        `
+        )
         .bind(
           userName,
           passwordHash,
@@ -1663,7 +1899,10 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async setEmailNotificationPreference?(userName: string, enabled: boolean): Promise<void> {
+  async setEmailNotificationPreference?(
+    userName: string,
+    enabled: boolean
+  ): Promise<void> {
     try {
       await this.db
         .prepare('UPDATE users SET email_notifications = ? WHERE username = ?')
@@ -1675,6 +1914,133 @@ export class D1Storage implements IStorage {
     } catch (err) {
       console.error('D1Storage.setEmailNotificationPreference error:', err);
       throw err;
+    }
+  }
+
+
+  async upsertPushSubscription(
+    userName: string,
+    subscription: PushSubscriptionRecord
+  ): Promise<void> {
+    try {
+      const result = await this.db
+        .prepare(`
+          INSERT INTO notification_push_subscriptions (
+            id, username, token_id, endpoint, p256dh, auth, user_agent, enabled,
+            created_at, updated_at, last_success_at, last_failure_at, failure_count
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0)
+          ON CONFLICT(endpoint) DO UPDATE SET
+            username = excluded.username,
+            token_id = excluded.token_id,
+            p256dh = excluded.p256dh,
+            auth = excluded.auth,
+            user_agent = excluded.user_agent,
+            enabled = 1,
+            updated_at = excluded.updated_at
+        `)
+        .bind(
+          subscription.id,
+          userName,
+          subscription.tokenId || null,
+          subscription.endpoint,
+          subscription.p256dh,
+          subscription.auth,
+          subscription.userAgent || null,
+          subscription.enabled ? 1 : 0,
+          subscription.createdAt,
+          subscription.updatedAt
+        )
+        .run();
+      if (!result.success) {
+        throw new Error(result.error || '保存浏览器通知订阅失败');
+      }
+    } catch (err) {
+      console.error('D1Storage.upsertPushSubscription error:', err);
+      throw err;
+    }
+  }
+
+  async getEnabledPushSubscriptions(userName: string): Promise<PushSubscriptionRecord[]> {
+    try {
+      const results = await this.db
+        .prepare('SELECT * FROM notification_push_subscriptions WHERE username = ? AND enabled = 1')
+        .bind(userName)
+        .all();
+
+      return (results.results || []).map((row: any) => ({
+        id: row.id as string,
+        username: row.username as string,
+        tokenId: (row.token_id as string | null) || null,
+        endpoint: row.endpoint as string,
+        p256dh: row.p256dh as string,
+        auth: row.auth as string,
+        userAgent: (row.user_agent as string | null) || null,
+        enabled: row.enabled === 1,
+        createdAt: Number(row.created_at),
+        updatedAt: Number(row.updated_at),
+        lastSuccessAt: row.last_success_at ? Number(row.last_success_at) : null,
+        lastFailureAt: row.last_failure_at ? Number(row.last_failure_at) : null,
+        failureCount: Number(row.failure_count || 0),
+      }));
+    } catch (err) {
+      console.error('D1Storage.getEnabledPushSubscriptions error:', err);
+      return [];
+    }
+  }
+
+  async deletePushSubscriptionByEndpoint(userName: string, endpoint: string): Promise<void> {
+    try {
+      await this.db
+        .prepare('DELETE FROM notification_push_subscriptions WHERE username = ? AND endpoint = ?')
+        .bind(userName, endpoint)
+        .run();
+    } catch (err) {
+      console.error('D1Storage.deletePushSubscriptionByEndpoint error:', err);
+    }
+  }
+
+  async deletePushSubscriptionsByTokenId(userName: string, tokenId: string): Promise<void> {
+    try {
+      await this.db
+        .prepare('DELETE FROM notification_push_subscriptions WHERE username = ? AND token_id = ?')
+        .bind(userName, tokenId)
+        .run();
+    } catch (err) {
+      console.error('D1Storage.deletePushSubscriptionsByTokenId error:', err);
+    }
+  }
+
+  async deleteAllPushSubscriptions(userName: string): Promise<void> {
+    try {
+      await this.db
+        .prepare('DELETE FROM notification_push_subscriptions WHERE username = ?')
+        .bind(userName)
+        .run();
+    } catch (err) {
+      console.error('D1Storage.deleteAllPushSubscriptions error:', err);
+    }
+  }
+
+  async updatePushSubscriptionDeliveryStats(
+    userName: string,
+    endpoint: string,
+    success: boolean
+  ): Promise<void> {
+    try {
+      const now = Date.now();
+      if (success) {
+        await this.db
+          .prepare('UPDATE notification_push_subscriptions SET last_success_at = ?, failure_count = 0, updated_at = ? WHERE username = ? AND endpoint = ?')
+          .bind(now, now, userName, endpoint)
+          .run();
+      } else {
+        await this.db
+          .prepare('UPDATE notification_push_subscriptions SET last_failure_at = ?, failure_count = failure_count + 1, updated_at = ? WHERE username = ? AND endpoint = ?')
+          .bind(now, now, userName, endpoint)
+          .run();
+      }
+    } catch (err) {
+      console.error('D1Storage.updatePushSubscriptionDeliveryStats error:', err);
     }
   }
 
@@ -1694,10 +2060,15 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async setTvboxSubscribeToken?(userName: string, token: string): Promise<void> {
+  async setTvboxSubscribeToken?(
+    userName: string,
+    token: string
+  ): Promise<void> {
     try {
       await this.db
-        .prepare('UPDATE users SET tvbox_subscribe_token = ? WHERE username = ?')
+        .prepare(
+          'UPDATE users SET tvbox_subscribe_token = ? WHERE username = ?'
+        )
         .bind(token, userName)
         .run();
 
@@ -1728,7 +2099,9 @@ export class D1Storage implements IStorage {
   async getSearchHistory(userName: string): Promise<string[]> {
     try {
       const results = await this.db
-        .prepare('SELECT keyword FROM search_history WHERE username = ? ORDER BY timestamp DESC LIMIT 20')
+        .prepare(
+          'SELECT keyword FROM search_history WHERE username = ? ORDER BY timestamp DESC LIMIT 20'
+        )
         .bind(userName)
         .all();
 
@@ -1746,24 +2119,29 @@ export class D1Storage implements IStorage {
 
       // 插入或更新时间戳
       await this.db
-        .prepare(`
+        .prepare(
+          `
           INSERT INTO search_history (username, keyword, timestamp)
           VALUES (?, ?, ?)
           ON CONFLICT(username, keyword) DO UPDATE SET timestamp = excluded.timestamp
-        `)
+        `
+        )
         .bind(userName, keyword, timestamp)
         .run();
 
       // 保持最多 20 条记录
       const countResult = await this.db
-        .prepare('SELECT COUNT(*) as count FROM search_history WHERE username = ?')
+        .prepare(
+          'SELECT COUNT(*) as count FROM search_history WHERE username = ?'
+        )
         .bind(userName)
         .first();
 
       const count = (countResult?.count as number) || 0;
       if (count > 20) {
         await this.db
-          .prepare(`
+          .prepare(
+            `
             DELETE FROM search_history
             WHERE username = ?
             AND id NOT IN (
@@ -1772,7 +2150,8 @@ export class D1Storage implements IStorage {
               ORDER BY timestamp DESC
               LIMIT 20
             )
-          `)
+          `
+          )
           .bind(userName, userName)
           .run();
       }
@@ -1786,7 +2165,9 @@ export class D1Storage implements IStorage {
     try {
       if (keyword) {
         await this.db
-          .prepare('DELETE FROM search_history WHERE username = ? AND keyword = ?')
+          .prepare(
+            'DELETE FROM search_history WHERE username = ? AND keyword = ?'
+          )
           .bind(userName, keyword)
           .run();
       } else {
@@ -1803,7 +2184,10 @@ export class D1Storage implements IStorage {
 
   // ==================== 漫画书架 ====================
 
-  async getMangaShelf(userName: string, key: string): Promise<MangaShelfItem | null> {
+  async getMangaShelf(
+    userName: string,
+    key: string
+  ): Promise<MangaShelfItem | null> {
     try {
       await this.schemaReady;
       const result = await this.db
@@ -1827,11 +2211,13 @@ export class D1Storage implements IStorage {
         latestChapterId: (result.latest_chapter_id as string) || undefined,
         latestChapterName: (result.latest_chapter_name as string) || undefined,
         latestChapterCount:
-          result.latest_chapter_count === null || result.latest_chapter_count === undefined
+          result.latest_chapter_count === null ||
+          result.latest_chapter_count === undefined
             ? undefined
             : Number(result.latest_chapter_count),
         unreadChapterCount:
-          result.unread_chapter_count === null || result.unread_chapter_count === undefined
+          result.unread_chapter_count === null ||
+          result.unread_chapter_count === undefined
             ? undefined
             : Number(result.unread_chapter_count),
       };
@@ -1841,11 +2227,16 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async setMangaShelf(userName: string, key: string, item: MangaShelfItem): Promise<void> {
+  async setMangaShelf(
+    userName: string,
+    key: string,
+    item: MangaShelfItem
+  ): Promise<void> {
     try {
       await this.schemaReady;
       await this.db
-        .prepare(`
+        .prepare(
+          `
           INSERT INTO manga_shelf (
             username, key, source_id, source_name, manga_id, title, cover, save_time,
             description, author, status, last_chapter_id, last_chapter_name,
@@ -1868,7 +2259,8 @@ export class D1Storage implements IStorage {
             latest_chapter_name = excluded.latest_chapter_name,
             latest_chapter_count = excluded.latest_chapter_count,
             unread_chapter_count = excluded.unread_chapter_count
-        `)
+        `
+        )
         .bind(
           userName,
           key,
@@ -1895,11 +2287,15 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async getAllMangaShelf(userName: string): Promise<{ [key: string]: MangaShelfItem }> {
+  async getAllMangaShelf(
+    userName: string
+  ): Promise<{ [key: string]: MangaShelfItem }> {
     try {
       await this.schemaReady;
       const results = await this.db
-        .prepare('SELECT * FROM manga_shelf WHERE username = ? ORDER BY save_time DESC')
+        .prepare(
+          'SELECT * FROM manga_shelf WHERE username = ? ORDER BY save_time DESC'
+        )
         .bind(userName)
         .all();
 
@@ -1922,11 +2318,13 @@ export class D1Storage implements IStorage {
           latestChapterId: (row.latest_chapter_id as string) || undefined,
           latestChapterName: (row.latest_chapter_name as string) || undefined,
           latestChapterCount:
-            row.latest_chapter_count === null || row.latest_chapter_count === undefined
+            row.latest_chapter_count === null ||
+            row.latest_chapter_count === undefined
               ? undefined
               : Number(row.latest_chapter_count),
           unreadChapterCount:
-            row.unread_chapter_count === null || row.unread_chapter_count === undefined
+            row.unread_chapter_count === null ||
+            row.unread_chapter_count === undefined
               ? undefined
               : Number(row.unread_chapter_count),
         };
@@ -1953,10 +2351,15 @@ export class D1Storage implements IStorage {
 
   // ==================== 漫画阅读历史 ====================
 
-  async getMangaReadRecord(userName: string, key: string): Promise<MangaReadRecord | null> {
+  async getMangaReadRecord(
+    userName: string,
+    key: string
+  ): Promise<MangaReadRecord | null> {
     try {
       const result = await this.db
-        .prepare('SELECT * FROM manga_read_records WHERE username = ? AND key = ?')
+        .prepare(
+          'SELECT * FROM manga_read_records WHERE username = ? AND key = ?'
+        )
         .bind(userName, key)
         .first();
 
@@ -1979,10 +2382,15 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async setMangaReadRecord(userName: string, key: string, record: MangaReadRecord): Promise<void> {
+  async setMangaReadRecord(
+    userName: string,
+    key: string,
+    record: MangaReadRecord
+  ): Promise<void> {
     try {
       await this.db
-        .prepare(`
+        .prepare(
+          `
           INSERT INTO manga_read_records (
             username, key, source_id, source_name, manga_id, title, cover,
             chapter_id, chapter_name, page_index, page_count, save_time
@@ -1999,7 +2407,8 @@ export class D1Storage implements IStorage {
             page_index = excluded.page_index,
             page_count = excluded.page_count,
             save_time = excluded.save_time
-        `)
+        `
+        )
         .bind(
           userName,
           key,
@@ -2021,10 +2430,14 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async getAllMangaReadRecords(userName: string): Promise<{ [key: string]: MangaReadRecord }> {
+  async getAllMangaReadRecords(
+    userName: string
+  ): Promise<{ [key: string]: MangaReadRecord }> {
     try {
       const results = await this.db
-        .prepare('SELECT * FROM manga_read_records WHERE username = ? ORDER BY save_time DESC')
+        .prepare(
+          'SELECT * FROM manga_read_records WHERE username = ? ORDER BY save_time DESC'
+        )
         .bind(userName)
         .all();
 
@@ -2056,7 +2469,9 @@ export class D1Storage implements IStorage {
   async deleteMangaReadRecord(userName: string, key: string): Promise<void> {
     try {
       await this.db
-        .prepare('DELETE FROM manga_read_records WHERE username = ? AND key = ?')
+        .prepare(
+          'DELETE FROM manga_read_records WHERE username = ? AND key = ?'
+        )
         .bind(userName, key)
         .run();
     } catch (err) {
@@ -2067,10 +2482,15 @@ export class D1Storage implements IStorage {
 
   async cleanupOldMangaReadRecords(userName: string): Promise<void> {
     try {
-      const maxRecords = parseInt(process.env.MAX_MANGA_HISTORY_PER_USER || '100', 10);
+      const maxRecords = parseInt(
+        process.env.MAX_MANGA_HISTORY_PER_USER || '100',
+        10
+      );
       const threshold = maxRecords + 10;
       const countResult = await this.db
-        .prepare('SELECT COUNT(*) as count FROM manga_read_records WHERE username = ?')
+        .prepare(
+          'SELECT COUNT(*) as count FROM manga_read_records WHERE username = ?'
+        )
         .bind(userName)
         .first();
 
@@ -2078,7 +2498,8 @@ export class D1Storage implements IStorage {
       if (count <= threshold) return;
 
       await this.db
-        .prepare(`
+        .prepare(
+          `
           DELETE FROM manga_read_records
           WHERE username = ?
           AND key NOT IN (
@@ -2087,7 +2508,8 @@ export class D1Storage implements IStorage {
             ORDER BY save_time DESC
             LIMIT ?
           )
-        `)
+        `
+        )
         .bind(userName, userName, maxRecords)
         .run();
     } catch (err) {
@@ -2096,9 +2518,362 @@ export class D1Storage implements IStorage {
     }
   }
 
+  // ==================== 电子书书架 ====================
+
+  async getBookShelf(
+    userName: string,
+    key: string
+  ): Promise<BookShelfItem | null> {
+    try {
+      const result = await this.db
+        .prepare('SELECT * FROM book_shelf WHERE username = ? AND key = ?')
+        .bind(userName, key)
+        .first();
+      if (!result) return null;
+      return {
+        sourceId: result.source_id as string,
+        sourceName: result.source_name as string,
+        bookId: result.book_id as string,
+        title: result.title as string,
+        author: (result.author as string) || undefined,
+        cover: (result.cover as string) || undefined,
+        format: (result.format as 'epub' | 'pdf' | null) || undefined,
+        detailHref: (result.detail_href as string) || undefined,
+        acquisitionHref: (result.acquisition_href as string) || undefined,
+        progressPercent:
+          result.progress_percent === null ||
+          result.progress_percent === undefined
+            ? undefined
+            : Number(result.progress_percent),
+        lastReadTime:
+          result.last_read_time === null || result.last_read_time === undefined
+            ? undefined
+            : Number(result.last_read_time),
+        lastLocatorType:
+          (result.last_locator_type as BookShelfItem['lastLocatorType']) ||
+          undefined,
+        lastLocatorValue: (result.last_locator_value as string) || undefined,
+        lastChapterTitle: (result.last_chapter_title as string) || undefined,
+        saveTime: Number(result.save_time || 0),
+      };
+    } catch (err) {
+      console.error('D1Storage.getBookShelf error:', err);
+      throw err;
+    }
+  }
+
+  async setBookShelf(
+    userName: string,
+    key: string,
+    item: BookShelfItem
+  ): Promise<void> {
+    try {
+      await this.db
+        .prepare(
+          `
+          INSERT INTO book_shelf (
+            username, key, source_id, source_name, book_id, title, author, cover, format, detail_href, acquisition_href,
+            progress_percent, last_read_time, last_locator_type, last_locator_value, last_chapter_title, save_time
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(username, key) DO UPDATE SET
+            source_id = excluded.source_id,
+            source_name = excluded.source_name,
+            book_id = excluded.book_id,
+            title = excluded.title,
+            author = excluded.author,
+            cover = excluded.cover,
+            format = excluded.format,
+            detail_href = excluded.detail_href,
+            acquisition_href = excluded.acquisition_href,
+            progress_percent = excluded.progress_percent,
+            last_read_time = excluded.last_read_time,
+            last_locator_type = excluded.last_locator_type,
+            last_locator_value = excluded.last_locator_value,
+            last_chapter_title = excluded.last_chapter_title,
+            save_time = excluded.save_time
+        `
+        )
+        .bind(
+          userName,
+          key,
+          item.sourceId,
+          item.sourceName,
+          item.bookId,
+          item.title,
+          item.author || null,
+          item.cover || null,
+          item.format || null,
+          item.detailHref || null,
+          item.acquisitionHref || null,
+          item.progressPercent ?? null,
+          item.lastReadTime ?? null,
+          item.lastLocatorType || null,
+          item.lastLocatorValue || null,
+          item.lastChapterTitle || null,
+          item.saveTime
+        )
+        .run();
+    } catch (err) {
+      console.error('D1Storage.setBookShelf error:', err);
+      throw err;
+    }
+  }
+
+  async getAllBookShelf(
+    userName: string
+  ): Promise<{ [key: string]: BookShelfItem }> {
+    try {
+      const results = await this.db
+        .prepare(
+          'SELECT * FROM book_shelf WHERE username = ? ORDER BY COALESCE(last_read_time, save_time) DESC'
+        )
+        .bind(userName)
+        .all();
+      const shelves: { [key: string]: BookShelfItem } = {};
+      if (!results.results) return shelves;
+      for (const row of results.results) {
+        shelves[row.key as string] = {
+          sourceId: row.source_id as string,
+          sourceName: row.source_name as string,
+          bookId: row.book_id as string,
+          title: row.title as string,
+          author: (row.author as string) || undefined,
+          cover: (row.cover as string) || undefined,
+          format: (row.format as 'epub' | 'pdf' | null) || undefined,
+          detailHref: (row.detail_href as string) || undefined,
+          acquisitionHref: (row.acquisition_href as string) || undefined,
+          progressPercent:
+            row.progress_percent === null || row.progress_percent === undefined
+              ? undefined
+              : Number(row.progress_percent),
+          lastReadTime:
+            row.last_read_time === null || row.last_read_time === undefined
+              ? undefined
+              : Number(row.last_read_time),
+          lastLocatorType:
+            (row.last_locator_type as BookShelfItem['lastLocatorType']) ||
+            undefined,
+          lastLocatorValue: (row.last_locator_value as string) || undefined,
+          lastChapterTitle: (row.last_chapter_title as string) || undefined,
+          saveTime: Number(row.save_time || 0),
+        };
+      }
+      return shelves;
+    } catch (err) {
+      console.error('D1Storage.getAllBookShelf error:', err);
+      throw err;
+    }
+  }
+
+  async deleteBookShelf(userName: string, key: string): Promise<void> {
+    try {
+      await this.db
+        .prepare('DELETE FROM book_shelf WHERE username = ? AND key = ?')
+        .bind(userName, key)
+        .run();
+    } catch (err) {
+      console.error('D1Storage.deleteBookShelf error:', err);
+      throw err;
+    }
+  }
+
+  // ==================== 电子书阅读历史 ====================
+
+  async getBookReadRecord(
+    userName: string,
+    key: string
+  ): Promise<BookReadRecord | null> {
+    try {
+      const result = await this.db
+        .prepare(
+          'SELECT * FROM book_read_records WHERE username = ? AND key = ?'
+        )
+        .bind(userName, key)
+        .first();
+      if (!result) return null;
+      return {
+        sourceId: result.source_id as string,
+        sourceName: result.source_name as string,
+        bookId: result.book_id as string,
+        title: result.title as string,
+        author: (result.author as string) || undefined,
+        cover: (result.cover as string) || undefined,
+        format: result.format as 'epub' | 'pdf',
+        detailHref: (result.detail_href as string) || undefined,
+        acquisitionHref: (result.acquisition_href as string) || undefined,
+        locator: {
+          type: result.locator_type as BookReadRecord['locator']['type'],
+          value: result.locator_value as string,
+          href: (result.chapter_href as string) || undefined,
+          chapterTitle: (result.chapter_title as string) || undefined,
+        },
+        progressPercent: Number(result.progress_percent || 0),
+        chapterTitle: (result.chapter_title as string) || undefined,
+        chapterHref: (result.chapter_href as string) || undefined,
+        saveTime: Number(result.save_time || 0),
+      };
+    } catch (err) {
+      console.error('D1Storage.getBookReadRecord error:', err);
+      throw err;
+    }
+  }
+
+  async setBookReadRecord(
+    userName: string,
+    key: string,
+    record: BookReadRecord
+  ): Promise<void> {
+    try {
+      await this.db
+        .prepare(
+          `
+          INSERT INTO book_read_records (
+            username, key, source_id, source_name, book_id, title, author, cover, format, detail_href, acquisition_href,
+            locator_type, locator_value, chapter_title, chapter_href, progress_percent, save_time
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(username, key) DO UPDATE SET
+            source_id = excluded.source_id,
+            source_name = excluded.source_name,
+            book_id = excluded.book_id,
+            title = excluded.title,
+            author = excluded.author,
+            cover = excluded.cover,
+            format = excluded.format,
+            detail_href = excluded.detail_href,
+            acquisition_href = excluded.acquisition_href,
+            locator_type = excluded.locator_type,
+            locator_value = excluded.locator_value,
+            chapter_title = excluded.chapter_title,
+            chapter_href = excluded.chapter_href,
+            progress_percent = excluded.progress_percent,
+            save_time = excluded.save_time
+        `
+        )
+        .bind(
+          userName,
+          key,
+          record.sourceId,
+          record.sourceName,
+          record.bookId,
+          record.title,
+          record.author || null,
+          record.cover || null,
+          record.format,
+          record.detailHref || null,
+          record.acquisitionHref || null,
+          record.locator.type,
+          record.locator.value,
+          record.chapterTitle || record.locator.chapterTitle || null,
+          record.chapterHref || record.locator.href || null,
+          record.progressPercent,
+          record.saveTime
+        )
+        .run();
+    } catch (err) {
+      console.error('D1Storage.setBookReadRecord error:', err);
+      throw err;
+    }
+  }
+
+  async getAllBookReadRecords(
+    userName: string
+  ): Promise<{ [key: string]: BookReadRecord }> {
+    try {
+      const results = await this.db
+        .prepare(
+          'SELECT * FROM book_read_records WHERE username = ? ORDER BY save_time DESC'
+        )
+        .bind(userName)
+        .all();
+      const records: { [key: string]: BookReadRecord } = {};
+      if (!results.results) return records;
+      for (const row of results.results) {
+        records[row.key as string] = {
+          sourceId: row.source_id as string,
+          sourceName: row.source_name as string,
+          bookId: row.book_id as string,
+          title: row.title as string,
+          author: (row.author as string) || undefined,
+          cover: (row.cover as string) || undefined,
+          format: row.format as 'epub' | 'pdf',
+          detailHref: (row.detail_href as string) || undefined,
+          acquisitionHref: (row.acquisition_href as string) || undefined,
+          locator: {
+            type: row.locator_type as BookReadRecord['locator']['type'],
+            value: row.locator_value as string,
+            href: (row.chapter_href as string) || undefined,
+            chapterTitle: (row.chapter_title as string) || undefined,
+          },
+          progressPercent: Number(row.progress_percent || 0),
+          chapterTitle: (row.chapter_title as string) || undefined,
+          chapterHref: (row.chapter_href as string) || undefined,
+          saveTime: Number(row.save_time || 0),
+        };
+      }
+      return records;
+    } catch (err) {
+      console.error('D1Storage.getAllBookReadRecords error:', err);
+      throw err;
+    }
+  }
+
+  async deleteBookReadRecord(userName: string, key: string): Promise<void> {
+    try {
+      await this.db
+        .prepare('DELETE FROM book_read_records WHERE username = ? AND key = ?')
+        .bind(userName, key)
+        .run();
+    } catch (err) {
+      console.error('D1Storage.deleteBookReadRecord error:', err);
+      throw err;
+    }
+  }
+
+  async cleanupOldBookReadRecords(userName: string): Promise<void> {
+    try {
+      const maxRecords = parseInt(
+        process.env.MAX_BOOK_HISTORY_PER_USER || '100',
+        10
+      );
+      const threshold = maxRecords + 10;
+      const countResult = await this.db
+        .prepare(
+          'SELECT COUNT(*) as count FROM book_read_records WHERE username = ?'
+        )
+        .bind(userName)
+        .first();
+      const count = Number(countResult?.count || 0);
+      if (count <= threshold) return;
+      await this.db
+        .prepare(
+          `
+          DELETE FROM book_read_records
+          WHERE username = ?
+          AND key NOT IN (
+            SELECT key FROM book_read_records
+            WHERE username = ?
+            ORDER BY save_time DESC
+            LIMIT ?
+          )
+        `
+        )
+        .bind(userName, userName, maxRecords)
+        .run();
+    } catch (err) {
+      console.error('D1Storage.cleanupOldBookReadRecords error:', err);
+      throw err;
+    }
+  }
+
   // ==================== 跳过配置 ====================
 
-  async getSkipConfig(userName: string, source: string, id: string): Promise<SkipConfig | null> {
+  async getSkipConfig(
+    userName: string,
+    source: string,
+    id: string
+  ): Promise<SkipConfig | null> {
     try {
       const key = `${source}+${id}`;
       const result = await this.db
@@ -2118,19 +2893,32 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async setSkipConfig(userName: string, source: string, id: string, config: SkipConfig): Promise<void> {
+  async setSkipConfig(
+    userName: string,
+    source: string,
+    id: string,
+    config: SkipConfig
+  ): Promise<void> {
     try {
       const key = `${source}+${id}`;
       await this.db
-        .prepare(`
+        .prepare(
+          `
           INSERT INTO skip_configs (username, key, enable, intro_time, outro_time)
           VALUES (?, ?, ?, ?, ?)
           ON CONFLICT(username, key) DO UPDATE SET
             enable = excluded.enable,
             intro_time = excluded.intro_time,
             outro_time = excluded.outro_time
-        `)
-        .bind(userName, key, config.enable ? 1 : 0, config.intro_time, config.outro_time)
+        `
+        )
+        .bind(
+          userName,
+          key,
+          config.enable ? 1 : 0,
+          config.intro_time,
+          config.outro_time
+        )
         .run();
     } catch (err) {
       console.error('D1Storage.setSkipConfig error:', err);
@@ -2138,7 +2926,11 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async deleteSkipConfig(userName: string, source: string, id: string): Promise<void> {
+  async deleteSkipConfig(
+    userName: string,
+    source: string,
+    id: string
+  ): Promise<void> {
     try {
       const key = `${source}+${id}`;
       await this.db
@@ -2151,7 +2943,9 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async getAllSkipConfigs(userName: string): Promise<{ [key: string]: SkipConfig }> {
+  async getAllSkipConfigs(
+    userName: string
+  ): Promise<{ [key: string]: SkipConfig }> {
     try {
       const results = await this.db
         .prepare('SELECT * FROM skip_configs WHERE username = ?')
@@ -2191,7 +2985,9 @@ export class D1Storage implements IStorage {
 
   // ==================== 弹幕过滤配置 ====================
 
-  async getDanmakuFilterConfig(userName: string): Promise<DanmakuFilterConfig | null> {
+  async getDanmakuFilterConfig(
+    userName: string
+  ): Promise<DanmakuFilterConfig | null> {
     try {
       const result = await this.db
         .prepare('SELECT rules FROM danmaku_filter_configs WHERE username = ?')
@@ -2206,14 +3002,19 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async setDanmakuFilterConfig(userName: string, config: DanmakuFilterConfig): Promise<void> {
+  async setDanmakuFilterConfig(
+    userName: string,
+    config: DanmakuFilterConfig
+  ): Promise<void> {
     try {
       await this.db
-        .prepare(`
+        .prepare(
+          `
           INSERT INTO danmaku_filter_configs (username, rules)
           VALUES (?, ?)
           ON CONFLICT(username) DO UPDATE SET rules = excluded.rules
-        `)
+        `
+        )
         .bind(userName, JSON.stringify(config))
         .run();
     } catch (err) {
@@ -2239,7 +3040,9 @@ export class D1Storage implements IStorage {
   async getNotifications(userName: string): Promise<Notification[]> {
     try {
       const results = await this.db
-        .prepare('SELECT * FROM notifications WHERE username = ? ORDER BY timestamp DESC')
+        .prepare(
+          'SELECT * FROM notifications WHERE username = ? ORDER BY timestamp DESC'
+        )
         .bind(userName)
         .all();
 
@@ -2259,13 +3062,18 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async addNotification(userName: string, notification: Notification): Promise<void> {
+  async addNotification(
+    userName: string,
+    notification: Notification
+  ): Promise<void> {
     try {
       await this.db
-        .prepare(`
+        .prepare(
+          `
           INSERT INTO notifications (id, username, type, title, message, timestamp, read, metadata)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `)
+        `
+        )
         .bind(
           notification.id,
           userName,
@@ -2277,16 +3085,23 @@ export class D1Storage implements IStorage {
           notification.metadata ? JSON.stringify(notification.metadata) : null
         )
         .run();
+
+      await dispatchNotificationChannels(this, userName, notification);
     } catch (err) {
       console.error('D1Storage.addNotification error:', err);
       throw err;
     }
   }
 
-  async markNotificationAsRead(userName: string, notificationId: string): Promise<void> {
+  async markNotificationAsRead(
+    userName: string,
+    notificationId: string
+  ): Promise<void> {
     try {
       await this.db
-        .prepare('UPDATE notifications SET read = 1 WHERE username = ? AND id = ?')
+        .prepare(
+          'UPDATE notifications SET read = 1 WHERE username = ? AND id = ?'
+        )
         .bind(userName, notificationId)
         .run();
     } catch (err) {
@@ -2295,7 +3110,10 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async deleteNotification(userName: string, notificationId: string): Promise<void> {
+  async deleteNotification(
+    userName: string,
+    notificationId: string
+  ): Promise<void> {
     try {
       await this.db
         .prepare('DELETE FROM notifications WHERE username = ? AND id = ?')
@@ -2322,7 +3140,9 @@ export class D1Storage implements IStorage {
   async getUnreadNotificationCount(userName: string): Promise<number> {
     try {
       const result = await this.db
-        .prepare('SELECT COUNT(*) as count FROM notifications WHERE username = ? AND read = 0')
+        .prepare(
+          'SELECT COUNT(*) as count FROM notifications WHERE username = ? AND read = 0'
+        )
         .bind(userName)
         .first();
 
@@ -2367,14 +3187,16 @@ export class D1Storage implements IStorage {
   async createMovieRequest(request: MovieRequest): Promise<void> {
     try {
       await this.db
-        .prepare(`
+        .prepare(
+          `
           INSERT INTO movie_requests (
             id, tmdb_id, title, year, media_type, season, poster, overview,
             requested_by, request_count, status, created_at, updated_at,
             fulfilled_at, fulfilled_source, fulfilled_id
           )
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `)
+        `
+        )
         .bind(
           request.id,
           request.tmdbId || null,
@@ -2400,7 +3222,10 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async updateMovieRequest(requestId: string, updates: Partial<MovieRequest>): Promise<void> {
+  async updateMovieRequest(
+    requestId: string,
+    updates: Partial<MovieRequest>
+  ): Promise<void> {
     try {
       const fields: string[] = [];
       const values: any[] = [];
@@ -2460,7 +3285,9 @@ export class D1Storage implements IStorage {
   async getUserMovieRequests(userName: string): Promise<string[]> {
     try {
       const results = await this.db
-        .prepare('SELECT request_id FROM user_movie_requests WHERE username = ?')
+        .prepare(
+          'SELECT request_id FROM user_movie_requests WHERE username = ?'
+        )
         .bind(userName)
         .all();
 
@@ -2472,10 +3299,15 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async addUserMovieRequest(userName: string, requestId: string): Promise<void> {
+  async addUserMovieRequest(
+    userName: string,
+    requestId: string
+  ): Promise<void> {
     try {
       await this.db
-        .prepare('INSERT OR IGNORE INTO user_movie_requests (username, request_id) VALUES (?, ?)')
+        .prepare(
+          'INSERT OR IGNORE INTO user_movie_requests (username, request_id) VALUES (?, ?)'
+        )
         .bind(userName, requestId)
         .run();
     } catch (err) {
@@ -2484,10 +3316,15 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async removeUserMovieRequest(userName: string, requestId: string): Promise<void> {
+  async removeUserMovieRequest(
+    userName: string,
+    requestId: string
+  ): Promise<void> {
     try {
       await this.db
-        .prepare('DELETE FROM user_movie_requests WHERE username = ? AND request_id = ?')
+        .prepare(
+          'DELETE FROM user_movie_requests WHERE username = ? AND request_id = ?'
+        )
         .bind(userName, requestId)
         .run();
     } catch (err) {
@@ -2536,11 +3373,13 @@ export class D1Storage implements IStorage {
   async setAdminConfig(config: AdminConfig): Promise<void> {
     try {
       await this.db
-        .prepare(`
+        .prepare(
+          `
           INSERT INTO admin_config (id, config, updated_at)
           VALUES (1, ?, ?)
           ON CONFLICT(id) DO UPDATE SET config = excluded.config, updated_at = excluded.updated_at
-        `)
+        `
+        )
         .bind(JSON.stringify(config), Date.now())
         .run();
     } catch (err) {
@@ -2558,10 +3397,9 @@ export class D1Storage implements IStorage {
         'search_history',
         'manga_shelf',
         'manga_read_records',
+        'book_shelf',
+        'book_read_records',
         'skip_configs',
-        'music_play_records',
-        'music_playlists',
-        'music_playlist_songs',
         'music_v2_history',
         'music_v2_playlists',
         'music_v2_playlist_items',
@@ -2574,7 +3412,19 @@ export class D1Storage implements IStorage {
       ];
 
       for (const table of tables) {
-        await this.db.prepare(`DELETE FROM ${table}`).run();
+        try {
+          await this.db.prepare(`DELETE FROM ${table}`).run();
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (
+            message.includes('no such table') ||
+            message.includes('does not exist')
+          ) {
+            console.warn('D1Storage.clearAllData warning:', table, message);
+            continue;
+          }
+          throw err;
+        }
       }
     } catch (err) {
       console.error('D1Storage.clearAllData error:', err);
@@ -2599,11 +3449,13 @@ export class D1Storage implements IStorage {
   async setGlobalValue(key: string, value: string): Promise<void> {
     try {
       await this.db
-        .prepare(`
+        .prepare(
+          `
           INSERT INTO global_config (key, value, updated_at)
           VALUES (?, ?, ?)
           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-        `)
+        `
+        )
         .bind(key, value, Date.now())
         .run();
     } catch (err) {
@@ -2624,10 +3476,144 @@ export class D1Storage implements IStorage {
     }
   }
 
+
+  private mapTelegramBinding(row: any): import('./types').TelegramBindingRecord {
+    return {
+      username: row.username as string,
+      telegramUserId: String(row.telegram_user_id),
+      chatId: String(row.chat_id),
+      telegramUsername: (row.telegram_username as string | null) || null,
+      firstName: (row.first_name as string | null) || null,
+      lastName: (row.last_name as string | null) || null,
+      notificationsEnabled: row.notifications_enabled === 1,
+      boundAt: Number(row.bound_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  async getTelegramBinding(userName: string): Promise<import('./types').TelegramBindingRecord | null> {
+    try {
+      const row = await this.db
+        .prepare('SELECT * FROM telegram_bindings WHERE username = ?')
+        .bind(userName)
+        .first();
+      return row ? this.mapTelegramBinding(row) : null;
+    } catch (err) {
+      console.error('D1Storage.getTelegramBinding error:', err);
+      return null;
+    }
+  }
+
+  async getTelegramBindingByTelegramUserId(telegramUserId: string): Promise<import('./types').TelegramBindingRecord | null> {
+    try {
+      const row = await this.db
+        .prepare('SELECT * FROM telegram_bindings WHERE telegram_user_id = ?')
+        .bind(telegramUserId)
+        .first();
+      return row ? this.mapTelegramBinding(row) : null;
+    } catch (err) {
+      console.error('D1Storage.getTelegramBindingByTelegramUserId error:', err);
+      return null;
+    }
+  }
+
+  async upsertTelegramBinding(binding: import('./types').TelegramBindingRecord): Promise<void> {
+    try {
+      await this.db
+        .prepare(`
+          INSERT INTO telegram_bindings (
+            username, telegram_user_id, chat_id, telegram_username, first_name, last_name,
+            notifications_enabled, bound_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(username) DO UPDATE SET
+            telegram_user_id = excluded.telegram_user_id,
+            chat_id = excluded.chat_id,
+            telegram_username = excluded.telegram_username,
+            first_name = excluded.first_name,
+            last_name = excluded.last_name,
+            notifications_enabled = excluded.notifications_enabled,
+            bound_at = excluded.bound_at,
+            updated_at = excluded.updated_at
+        `)
+        .bind(
+          binding.username,
+          binding.telegramUserId,
+          binding.chatId,
+          binding.telegramUsername || null,
+          binding.firstName || null,
+          binding.lastName || null,
+          binding.notificationsEnabled ? 1 : 0,
+          binding.boundAt,
+          binding.updatedAt
+        )
+        .run();
+    } catch (err) {
+      console.error('D1Storage.upsertTelegramBinding error:', err);
+      throw err;
+    }
+  }
+
+  async deleteTelegramBindingByUsername(userName: string): Promise<void> {
+    await this.db.prepare('DELETE FROM telegram_bindings WHERE username = ?').bind(userName).run();
+  }
+
+  async deleteTelegramBindingByTelegramUserId(telegramUserId: string): Promise<void> {
+    await this.db.prepare('DELETE FROM telegram_bindings WHERE telegram_user_id = ?').bind(telegramUserId).run();
+  }
+
+  async getTelegramBindSession(code: string): Promise<import('./types').TelegramBindSessionRecord | null> {
+    try {
+      const row = await this.db
+        .prepare('SELECT * FROM telegram_bind_sessions WHERE code = ?')
+        .bind(code)
+        .first();
+      if (!row) return null;
+      return {
+        code: row.code as string,
+        username: row.username as string,
+        createdAt: Number(row.created_at),
+        expiresAt: Number(row.expires_at),
+        used: row.used === 1,
+      };
+    } catch (err) {
+      console.error('D1Storage.getTelegramBindSession error:', err);
+      return null;
+    }
+  }
+
+  async upsertTelegramBindSession(session: import('./types').TelegramBindSessionRecord): Promise<void> {
+    try {
+      await this.db
+        .prepare(`
+          INSERT INTO telegram_bind_sessions (code, username, created_at, expires_at, used)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(code) DO UPDATE SET
+            username = excluded.username,
+            created_at = excluded.created_at,
+            expires_at = excluded.expires_at,
+            used = excluded.used
+        `)
+        .bind(session.code, session.username, session.createdAt, session.expiresAt, session.used ? 1 : 0)
+        .run();
+    } catch (err) {
+      console.error('D1Storage.upsertTelegramBindSession error:', err);
+      throw err;
+    }
+  }
+
+  async markTelegramBindSessionUsed(code: string): Promise<void> {
+    await this.db
+      .prepare('UPDATE telegram_bind_sessions SET used = 1 WHERE code = ?')
+      .bind(code)
+      .run();
+  }
+
   async getLastFavoriteCheckTime(userName: string): Promise<number> {
     try {
       const result = await this.db
-        .prepare('SELECT last_check_time FROM favorite_check_times WHERE username = ?')
+        .prepare(
+          'SELECT last_check_time FROM favorite_check_times WHERE username = ?'
+        )
         .bind(userName)
         .first();
 
@@ -2638,14 +3624,19 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async setLastFavoriteCheckTime(userName: string, timestamp: number): Promise<void> {
+  async setLastFavoriteCheckTime(
+    userName: string,
+    timestamp: number
+  ): Promise<void> {
     try {
       await this.db
-        .prepare(`
+        .prepare(
+          `
           INSERT INTO favorite_check_times (username, last_check_time)
           VALUES (?, ?)
           ON CONFLICT(username) DO UPDATE SET last_check_time = excluded.last_check_time
-        `)
+        `
+        )
         .bind(userName, timestamp)
         .run();
     } catch (err) {
@@ -2654,10 +3645,15 @@ export class D1Storage implements IStorage {
     }
   }
 
-  async updateLastMovieRequestTime(userName: string, timestamp: number): Promise<void> {
+  async updateLastMovieRequestTime(
+    userName: string,
+    timestamp: number
+  ): Promise<void> {
     try {
       await this.db
-        .prepare('UPDATE users SET last_movie_request_time = ? WHERE username = ?')
+        .prepare(
+          'UPDATE users SET last_movie_request_time = ? WHERE username = ?'
+        )
         .bind(timestamp, userName)
         .run();
     } catch (err) {
@@ -2685,11 +3681,13 @@ class RedisHashAdapter {
   async hSet(hashKey: string, field: string, value: string): Promise<void> {
     const key = `${hashKey}:${field}`;
     await this.db
-      .prepare(`
+      .prepare(
+        `
         INSERT INTO global_config (key, value, updated_at)
         VALUES (?, ?, ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-      `)
+      `
+      )
       .bind(key, value, Date.now())
       .run();
   }

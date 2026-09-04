@@ -1,5 +1,6 @@
 import { AdminConfig } from './admin.types';
 import { MangaReadRecord, MangaShelfItem } from './manga.types';
+import { BookReadRecord, BookShelfItem } from './book.types';
 
 // 播放记录数据结构
 export interface PlayRecord {
@@ -14,6 +15,9 @@ export interface PlayRecord {
   save_time: number; // 记录保存时间（时间戳）
   search_title: string; // 搜索时使用的标题
   new_episodes?: number; // 新增的剧集数量（用于显示更新提示）
+  origin?: 'vod' | 'live';
+  /** 是否动漫（写入时根据 CMS type_name/class 判断） */
+  is_anime?: boolean;
 }
 
 // 收藏数据结构
@@ -41,6 +45,7 @@ export interface IStorage {
   ): Promise<void>;
   getAllPlayRecords(userName: string): Promise<{ [key: string]: PlayRecord }>;
   deletePlayRecord(userName: string, key: string): Promise<void>;
+  deletePlayRecords(userName: string, keys: string[]): Promise<void>;
   // 清理超出限制的旧播放记录
   cleanupOldPlayRecords(userName: string): Promise<void>;
   // 迁移播放记录
@@ -57,7 +62,10 @@ export interface IStorage {
   // 音乐播放记录相关
   getMusicPlayRecord(userName: string, key: string): Promise<any | null>;
   setMusicPlayRecord(userName: string, key: string, record: any): Promise<void>;
-  batchSetMusicPlayRecords(userName: string, records: { key: string; record: any }[]): Promise<void>;
+  batchSetMusicPlayRecords(
+    userName: string,
+    records: { key: string; record: any }[]
+  ): Promise<void>;
   getAllMusicPlayRecords(userName: string): Promise<{ [key: string]: any }>;
   deleteMusicPlayRecord(userName: string, key: string): Promise<void>;
   clearAllMusicPlayRecords(userName: string): Promise<void>;
@@ -78,16 +86,57 @@ export interface IStorage {
 
   // 漫画书架相关
   getMangaShelf(userName: string, key: string): Promise<MangaShelfItem | null>;
-  setMangaShelf(userName: string, key: string, item: MangaShelfItem): Promise<void>;
-  getAllMangaShelf(userName: string): Promise<{ [key: string]: MangaShelfItem }>;
+  setMangaShelf(
+    userName: string,
+    key: string,
+    item: MangaShelfItem
+  ): Promise<void>;
+  getAllMangaShelf(
+    userName: string
+  ): Promise<{ [key: string]: MangaShelfItem }>;
   deleteMangaShelf(userName: string, key: string): Promise<void>;
 
   // 漫画阅读历史相关
-  getMangaReadRecord(userName: string, key: string): Promise<MangaReadRecord | null>;
-  setMangaReadRecord(userName: string, key: string, record: MangaReadRecord): Promise<void>;
-  getAllMangaReadRecords(userName: string): Promise<{ [key: string]: MangaReadRecord }>;
+  getMangaReadRecord(
+    userName: string,
+    key: string
+  ): Promise<MangaReadRecord | null>;
+  setMangaReadRecord(
+    userName: string,
+    key: string,
+    record: MangaReadRecord
+  ): Promise<void>;
+  getAllMangaReadRecords(
+    userName: string
+  ): Promise<{ [key: string]: MangaReadRecord }>;
   deleteMangaReadRecord(userName: string, key: string): Promise<void>;
   cleanupOldMangaReadRecords?(userName: string): Promise<void>;
+
+  // 电子书书架相关
+  getBookShelf(userName: string, key: string): Promise<BookShelfItem | null>;
+  setBookShelf(
+    userName: string,
+    key: string,
+    item: BookShelfItem
+  ): Promise<void>;
+  getAllBookShelf(userName: string): Promise<{ [key: string]: BookShelfItem }>;
+  deleteBookShelf(userName: string, key: string): Promise<void>;
+
+  // 电子书阅读历史相关
+  getBookReadRecord(
+    userName: string,
+    key: string
+  ): Promise<BookReadRecord | null>;
+  setBookReadRecord(
+    userName: string,
+    key: string,
+    record: BookReadRecord
+  ): Promise<void>;
+  getAllBookReadRecords(
+    userName: string
+  ): Promise<{ [key: string]: BookReadRecord }>;
+  deleteBookReadRecord(userName: string, key: string): Promise<void>;
+  cleanupOldBookReadRecords?(userName: string): Promise<void>;
 
   // 用户列表
   getAllUsers(): Promise<string[]>;
@@ -132,7 +181,10 @@ export interface IStorage {
   // 通知相关
   getNotifications(userName: string): Promise<Notification[]>;
   addNotification(userName: string, notification: Notification): Promise<void>;
-  markNotificationAsRead(userName: string, notificationId: string): Promise<void>;
+  markNotificationAsRead(
+    userName: string,
+    notificationId: string
+  ): Promise<void>;
   deleteNotification(userName: string, notificationId: string): Promise<void>;
   clearAllNotifications(userName: string): Promise<void>;
   getUnreadNotificationCount(userName: string): Promise<number>;
@@ -142,13 +194,19 @@ export interface IStorage {
   setLastFavoriteCheckTime(userName: string, timestamp: number): Promise<void>;
 
   // 求片冷却时间
-  updateLastMovieRequestTime?(userName: string, timestamp: number): Promise<void>;
+  updateLastMovieRequestTime?(
+    userName: string,
+    timestamp: number
+  ): Promise<void>;
 
   // 求片相关
   getAllMovieRequests(): Promise<MovieRequest[]>;
   getMovieRequest(requestId: string): Promise<MovieRequest | null>;
   createMovieRequest(request: MovieRequest): Promise<void>;
-  updateMovieRequest(requestId: string, updates: Partial<MovieRequest>): Promise<void>;
+  updateMovieRequest(
+    requestId: string,
+    updates: Partial<MovieRequest>
+  ): Promise<void>;
   deleteMovieRequest(requestId: string): Promise<void>;
   getUserMovieRequests(userName: string): Promise<string[]>;
   addUserMovieRequest(userName: string, requestId: string): Promise<void>;
@@ -174,7 +232,46 @@ export interface IStorage {
   getUserEmail?(userName: string): Promise<string | null>;
   setUserEmail?(userName: string, email: string): Promise<void>;
   getEmailNotificationPreference?(userName: string): Promise<boolean>;
-  setEmailNotificationPreference?(userName: string, enabled: boolean): Promise<void>;
+  setEmailNotificationPreference?(
+    userName: string,
+    enabled: boolean
+  ): Promise<void>;
+  // Web Push订阅相关
+  upsertPushSubscription?(
+    userName: string,
+    subscription: PushSubscriptionRecord
+  ): Promise<void>;
+  getEnabledPushSubscriptions?(userName: string): Promise<PushSubscriptionRecord[]>;
+  deletePushSubscriptionByEndpoint?(
+    userName: string,
+    endpoint: string
+  ): Promise<void>;
+  deletePushSubscriptionsByTokenId?(
+    userName: string,
+    tokenId: string
+  ): Promise<void>;
+  deleteAllPushSubscriptions?(userName: string): Promise<void>;
+  updatePushSubscriptionDeliveryStats?(
+    userName: string,
+    endpoint: string,
+    success: boolean
+  ): Promise<void>;
+
+  // Telegram Bot绑定相关
+  getTelegramBinding?(userName: string): Promise<TelegramBindingRecord | null>;
+  getTelegramBindingByTelegramUserId?(
+    telegramUserId: string
+  ): Promise<TelegramBindingRecord | null>;
+  upsertTelegramBinding?(binding: TelegramBindingRecord): Promise<void>;
+  deleteTelegramBindingByUsername?(userName: string): Promise<void>;
+  deleteTelegramBindingByTelegramUserId?(telegramUserId: string): Promise<void>;
+  getTelegramBindSession?(
+    code: string
+  ): Promise<TelegramBindSessionRecord | null>;
+  upsertTelegramBindSession?(
+    session: TelegramBindSessionRecord
+  ): Promise<void>;
+  markTelegramBindSessionUsed?(code: string): Promise<void>;
 
   // TVBox订阅token相关
   getTvboxSubscribeToken?(userName: string): Promise<string | null>;
@@ -200,11 +297,26 @@ export interface SearchResult {
   vod_remarks?: string; // 视频备注信息（如"全80集"、"更新至25集"等）
   vod_total?: number; // 总集数
   proxyMode?: boolean; // 代理模式：启用后由服务器代理m3u8和ts分片
-  subtitles?: Array<Array<{ label: string; url: string }>>; // 字幕列表（按集数索引）
+  subtitles?: Array<Array<{
+    label: string;
+    url: string;
+    fallbackUrl?: string;
+    fallbackFormat?: string;
+    language?: string;
+    format?: string; // 实际加载格式，如 vtt / ass / ssa
+    sourceFormat?: string; // Emby 返回的原始字幕格式
+    codec?: string;
+    isExternal?: boolean;
+    renderMode?: 'native' | 'jassub';
+  }>>; // 字幕列表（按集数索引）
   tmdb_id?: number; // TMDB ID
   rating?: number; // 评分
   initialEpisodeIndex?: number; // 初始集数索引（用于小雅源从文件点击进入时指定集数）
   metadataSource?: 'folder' | 'nfo' | 'tmdb' | 'file'; // 元数据来源（用于小雅源判断是否保留fileName）
+  /** OpenList 路径元信息：是否启用 14 分钟播放 URL 续期 */
+  refresh14m?: boolean;
+  /** OpenList 路径元信息：分类 */
+  category?: string;
 }
 
 // 豆瓣数据结构
@@ -254,6 +366,43 @@ export interface EpisodeFilterRule {
 export interface EpisodeFilterConfig {
   rules: EpisodeFilterRule[]; // 过滤规则列表
   reverseMode?: boolean; // 反向模式：开启后仅显示符合规则的集数
+}
+
+
+export interface PushSubscriptionRecord {
+  id: string;
+  username?: string;
+  tokenId?: string | null;
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+  userAgent?: string | null;
+  enabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+  lastSuccessAt?: number | null;
+  lastFailureAt?: number | null;
+  failureCount?: number;
+}
+
+export interface TelegramBindingRecord {
+  username: string;
+  telegramUserId: string;
+  chatId: string;
+  telegramUsername?: string | null;
+  firstName?: string | null;
+  lastName?: string | null;
+  notificationsEnabled: boolean;
+  boundAt: number;
+  updatedAt: number;
+}
+
+export interface TelegramBindSessionRecord {
+  code: string;
+  username: string;
+  createdAt: number;
+  expiresAt: number;
+  used: boolean;
 }
 
 // 通知类型枚举

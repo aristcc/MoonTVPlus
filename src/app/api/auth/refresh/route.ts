@@ -2,6 +2,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie, parseAuthInfo } from '@/lib/auth';
+import { db } from '@/lib/db';
 import { refreshAccessToken } from '@/lib/middleware-auth';
 import { TOKEN_CONFIG } from '@/lib/refresh-token';
 
@@ -72,6 +73,26 @@ export async function POST(request: NextRequest) {
   }
 
   const now = Date.now();
+
+  if (authInfo.username === process.env.USERNAME) {
+    if (authInfo.role !== 'owner') {
+      return NextResponse.json({ error: 'Role changed' }, { status: 401 });
+    }
+  } else {
+    const userInfo = await db.getUserInfoV2(authInfo.username);
+
+    if (!userInfo) {
+      return NextResponse.json({ error: 'User not found' }, { status: 401 });
+    }
+
+    if (userInfo.banned) {
+      return NextResponse.json({ error: 'User banned' }, { status: 403 });
+    }
+
+    if (userInfo.role !== authInfo.role) {
+      return NextResponse.json({ error: 'Role changed' }, { status: 401 });
+    }
+  }
 
   // 只检查 Refresh Token 是否过期
   if (now >= authInfo.refreshExpires) {

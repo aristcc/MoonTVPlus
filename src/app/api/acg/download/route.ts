@@ -3,9 +3,21 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getConfig } from '@/lib/config';
-import { OpenListClient } from '@/lib/openlist.client';
+import {
+  addOpenListOfflineDownload,
+  getOfflineDownloadBasePath,
+  joinOpenListPath,
+} from '@/lib/openlist-offline-download';
+import { hasFeaturePermission } from '@/lib/permissions';
 
 export const runtime = 'nodejs';
+
+const downloadTools = ['aria2', 'Transmission', 'qBittorrent'] as const;
+type DownloadTool = typeof downloadTools[number];
+
+function isDownloadTool(tool: unknown): tool is DownloadTool {
+  return typeof tool === 'string' && downloadTools.includes(tool as DownloadTool);
+}
 
 /**
  * POST /api/acg/download
@@ -15,14 +27,14 @@ export async function POST(req: NextRequest) {
   try {
     // 检查权限
     const authInfo = getAuthInfoFromCookie(req);
-    if (!authInfo || (authInfo.role !== 'admin' && authInfo.role !== 'owner')) {
+    if (!authInfo?.username || !(await hasFeaturePermission(authInfo.username, 'magnet_save_private_library'))) {
       return NextResponse.json(
         { error: '无权限访问' },
         { status: 403 }
       );
     }
 
-    const { url, name } = await req.json();
+    const { url, name, tool = 'aria2' } = await req.json();
 
     if (!url || typeof url !== 'string') {
       return NextResponse.json(
@@ -38,58 +50,22 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    if (!isDownloadTool(tool)) {
+      return NextResponse.json(
+        { error: '下载方式不支持' },
+        { status: 400 }
+      );
+    }
+
     // 获取 OpenList 配置
     const config = await getConfig();
-    const openlistConfig = config.OpenListConfig;
-
-    if (!openlistConfig?.Enabled) {
-      return NextResponse.json(
-        { error: '私人影库功能未启用' },
-        { status: 400 }
-      );
-    }
-
-    if (!openlistConfig.URL || !openlistConfig.Username || !openlistConfig.Password) {
-      return NextResponse.json(
-        { error: 'OpenList 配置不完整' },
-        { status: 400 }
-      );
-    }
 
     // 构建下载路径（使用离线下载目录）
-    const offlineDownloadPath = openlistConfig.OfflineDownloadPath || '/';
-    const downloadPath = `${offlineDownloadPath.replace(/\/$/, '')}/${name}`;
-
-    // 使用 OpenListClient 添加离线下载任务
-    const client = new OpenListClient(
-      openlistConfig.URL,
-      openlistConfig.Username,
-      openlistConfig.Password
+    const downloadPath = joinOpenListPath(
+      getOfflineDownloadBasePath(config),
+      name
     );
-
-    // 获取 Token 并调用 API
-    const token = await (client as any).getToken();
-    const openlistUrl = `${openlistConfig.URL.replace(/\/$/, '')}/api/fs/add_offline_download`;
-
-    const response = await fetch(openlistUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': token,
-      },
-      body: JSON.stringify({
-        path: downloadPath,
-        urls: [url],
-        tool: 'aria2',
-      }),
-    });
-
-    const data = await response.json();
-
-    // 检查响应状态
-    if (!response.ok || data.code !== 200) {
-      throw new Error(data.message || '添加离线下载任务失败');
-    }
+    await addOpenListOfflineDownload(config, downloadPath, url, tool);
 
     return NextResponse.json({
       success: true,

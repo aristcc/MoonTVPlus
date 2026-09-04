@@ -38,7 +38,7 @@ export async function getEmbyDetail(
   // 根据类型处理
   if (item.Type === 'Movie') {
     // 电影
-    const subtitles = client.getSubtitles(item);
+    const subtitles = client.getSubtitles(item, proxyToken);
 
     return {
       source: source, // 保持与请求一致（emby 或 emby_key）
@@ -89,7 +89,7 @@ export async function getEmbyDetail(
         const episodeNum = ep.IndexNumber || 1;
         return `S${seasonNum.toString().padStart(2, '0')}E${episodeNum.toString().padStart(2, '0')}`;
       }),
-      subtitles: allEpisodes.map((ep) => client.getSubtitles(ep)),
+      subtitles: allEpisodes.map((ep) => client.getSubtitles(ep, proxyToken)),
       proxyMode: false,
     };
   } else {
@@ -286,6 +286,12 @@ export async function getOpenListDetail(
 
   // 3. 从 metainfo 中获取元数据
   const { getTMDBImageUrl } = await import('@/lib/tmdb.search');
+  const { resolvePathMeta } = await import('@/lib/openlist-path-meta');
+  // folderName 为 metainfo 中的完整路径，PathMeta 按最长前缀匹配
+  const pathMetaResolved = resolvePathMeta(
+    folderName,
+    openListConfig.PathMeta
+  );
 
   return {
     source: 'openlist',
@@ -306,6 +312,8 @@ export async function getOpenListDetail(
     ),
     episodes_titles: episodes.map((ep) => ep.title!),
     proxyMode: false, // openlist 源不使用代理模式
+    category: pathMetaResolved.category || undefined,
+    refresh14m: pathMetaResolved.refresh14m,
   };
 }
 

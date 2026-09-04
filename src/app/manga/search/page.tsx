@@ -2,7 +2,7 @@
 
 import { Search } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { deleteMangaShelf, getAllMangaShelf, saveMangaShelf } from '@/lib/db.client';
 import { MangaSearchItem, MangaShelfItem, MangaSource } from '@/lib/manga.types';
@@ -43,6 +43,14 @@ export default function MangaSearchPage() {
   const [lastSearchedQuery, setLastSearchedQuery] = useState('');
   const [lastSearchedSourceId, setLastSearchedSourceId] = useState('');
   const restoredRef = useRef(false);
+  const forceNextUrlSearchRef = useRef(false);
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const currentSearchKeyRef = useRef('');
+  const pendingResultsRef = useRef<MangaSearchItem[]>([]);
+  const flushTimerRef = useRef<number | null>(null);
+  const [totalSources, setTotalSources] = useState(0);
+  const [completedSources, setCompletedSources] = useState(0);
+  const [useFluidSearch, setUseFluidSearch] = useState(true);
 
   const getCacheKey = useCallback((keyword: string, selectedSourceId: string) => {
     return `manga_search_cache_${selectedSourceId || 'all'}_${keyword.trim()}`;
@@ -73,6 +81,52 @@ export default function MangaSearchPage() {
     [getCacheKey]
   );
 
+
+  const readFluidSearchSetting = useCallback(() => {
+    if (typeof window === 'undefined') return true;
+    try {
+      const savedFluidSearch = localStorage.getItem('fluidSearch');
+      if (savedFluidSearch !== null) return JSON.parse(savedFluidSearch) !== false;
+    } catch {
+      // ignore invalid localStorage values
+    }
+    return (window as any).RUNTIME_CONFIG?.FLUID_SEARCH !== false;
+  }, []);
+
+  const closeEventSource = useCallback(() => {
+    if (eventSourceRef.current) {
+      try {
+        eventSourceRef.current.close();
+      } catch {
+        // ignore close failures
+      }
+      eventSourceRef.current = null;
+    }
+  }, []);
+
+  const clearPendingResults = useCallback(() => {
+    pendingResultsRef.current = [];
+    if (flushTimerRef.current) {
+      window.clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
+  }, []);
+
+  const appendBufferedResults = useCallback((nextResults: MangaSearchItem[]) => {
+    if (nextResults.length === 0) return;
+    pendingResultsRef.current.push(...nextResults);
+    if (!flushTimerRef.current) {
+      flushTimerRef.current = window.setTimeout(() => {
+        const toAppend = pendingResultsRef.current;
+        pendingResultsRef.current = [];
+        startTransition(() => {
+          setResults((prev) => prev.concat(toAppend));
+        });
+        flushTimerRef.current = null;
+      }, 80);
+    }
+  }, []);
+
   const saveSearchState = useCallback((nextState: { query: string; sourceId: string; results: MangaSearchItem[] }) => {
     if (typeof window === 'undefined') return;
     try {
@@ -99,51 +153,169 @@ export default function MangaSearchPage() {
   }, []);
 
   useEffect(() => {
+    setUseFluidSearch(readFluidSearchSetting());
+
     fetch('/api/manga/sources')
       .then((res) => res.json())
       .then((data) => setSources(data.sources || []))
       .catch(() => undefined);
 
     getAllMangaShelf().then(setShelf).catch(() => undefined);
-  }, []);
+
+    return () => {
+      closeEventSource();
+      clearPendingResults();
+    };
+  }, [clearPendingResults, closeEventSource, readFluidSearchSetting]);
 
   const performSearch = useCallback(
-    async (keyword: string, selectedSourceId: string) => {
+    async (keyword: string, selectedSourceId: string, options?: { forceRefresh?: boolean }) => {
       const trimmedQuery = keyword.trim();
       if (!trimmedQuery) return;
+      const normalizedSourceId = selectedSourceId || '';
+      const searchKey = `${normalizedSourceId}::${trimmedQuery}`;
+      const forceRefresh = options?.forceRefresh === true;
+
+      closeEventSource();
+      clearPendingResults();
+      currentSearchKeyRef.current = searchKey;
 
       setLoading(true);
       setError('');
       setHasSearched(true);
       setLastSearchedQuery(trimmedQuery);
-      setLastSearchedSourceId(selectedSourceId);
+      setLastSearchedSourceId(normalizedSourceId);
+      setTotalSources(0);
+      setCompletedSources(0);
 
-      const cached = getCachedResults(trimmedQuery, selectedSourceId);
+      const cached = forceRefresh ? null : getCachedResults(trimmedQuery, normalizedSourceId);
       if (cached) {
         setResults(cached);
-        saveSearchState({ query: trimmedQuery, sourceId: selectedSourceId, results: cached });
+        saveSearchState({ query: trimmedQuery, sourceId: normalizedSourceId, results: cached });
         setLoading(false);
+        setTotalSources(1);
+        setCompletedSources(1);
+        return;
+      }
+
+      setResults([]);
+
+      const currentFluidSearch = readFluidSearchSetting();
+      setUseFluidSearch((prev) => (prev === currentFluidSearch ? prev : currentFluidSearch));
+
+      const params = new URLSearchParams({ q: trimmedQuery });
+      if (normalizedSourceId) params.set('sourceId', normalizedSourceId);
+
+      if (currentFluidSearch) {
+        const es = new EventSource(`/api/manga/search/ws?${params.toString()}`);
+        eventSourceRef.current = es;
+
+        es.onmessage = (event) => {
+          if (!event.data || currentSearchKeyRef.current !== searchKey) return;
+          try {
+            const payload = JSON.parse(event.data);
+            switch (payload.type) {
+              case 'start':
+                setTotalSources(payload.totalSources || 0);
+                setCompletedSources(0);
+                break;
+              case 'source_result':
+                setCompletedSources((prev) => Math.max(prev + 1, payload.completedSources || 0));
+                if (Array.isArray(payload.results) && payload.results.length > 0) {
+                  appendBufferedResults(payload.results as MangaSearchItem[]);
+                }
+                break;
+              case 'source_error':
+                setCompletedSources((prev) => Math.max(prev + 1, payload.completedSources || 0));
+                break;
+              case 'error':
+                setError(payload.error || '搜索失败');
+                setLoading(false);
+                closeEventSource();
+                break;
+              case 'complete': {
+                setCompletedSources(payload.completedSources || payload.totalSources || 0);
+                if (pendingResultsRef.current.length > 0) {
+                  const toAppend = pendingResultsRef.current;
+                  pendingResultsRef.current = [];
+                  if (flushTimerRef.current) {
+                    window.clearTimeout(flushTimerRef.current);
+                    flushTimerRef.current = null;
+                  }
+                  startTransition(() => {
+                    setResults((prev) => {
+                      const nextResults = prev.concat(toAppend);
+                      setCachedResults(trimmedQuery, normalizedSourceId, nextResults);
+                      saveSearchState({ query: trimmedQuery, sourceId: normalizedSourceId, results: nextResults });
+                      return nextResults;
+                    });
+                  });
+                } else {
+                  setResults((prev) => {
+                    setCachedResults(trimmedQuery, normalizedSourceId, prev);
+                    saveSearchState({ query: trimmedQuery, sourceId: normalizedSourceId, results: prev });
+                    return prev;
+                  });
+                }
+                setLoading(false);
+                closeEventSource();
+                break;
+              }
+            }
+          } catch {
+            // ignore malformed SSE payloads
+          }
+        };
+
+        es.onerror = () => {
+          if (currentSearchKeyRef.current !== searchKey) return;
+          if (pendingResultsRef.current.length > 0) {
+            const toAppend = pendingResultsRef.current;
+            pendingResultsRef.current = [];
+            if (flushTimerRef.current) {
+              window.clearTimeout(flushTimerRef.current);
+              flushTimerRef.current = null;
+            }
+            startTransition(() => {
+              setResults((prev) => prev.concat(toAppend));
+            });
+          }
+          setLoading(false);
+          closeEventSource();
+        };
         return;
       }
 
       try {
-        const params = new URLSearchParams({ q: trimmedQuery });
-        if (selectedSourceId) params.set('sourceId', selectedSourceId);
         const res = await fetch(`/api/manga/search?${params.toString()}`);
         const data = await res.json();
+        if (currentSearchKeyRef.current !== searchKey) return;
         if (!res.ok) throw new Error(data.error || '搜索失败');
         const nextResults = data.results || [];
         setResults(nextResults);
-        setCachedResults(trimmedQuery, selectedSourceId, nextResults);
-        saveSearchState({ query: trimmedQuery, sourceId: selectedSourceId, results: nextResults });
+        setTotalSources(1);
+        setCompletedSources(1);
+        setCachedResults(trimmedQuery, normalizedSourceId, nextResults);
+        saveSearchState({ query: trimmedQuery, sourceId: normalizedSourceId, results: nextResults });
       } catch (err) {
+        if (currentSearchKeyRef.current !== searchKey) return;
         setError((err as Error).message);
         setResults([]);
       } finally {
-        setLoading(false);
+        if (currentSearchKeyRef.current === searchKey) {
+          setLoading(false);
+        }
       }
     },
-    [getCachedResults, saveSearchState, setCachedResults]
+    [
+      appendBufferedResults,
+      clearPendingResults,
+      closeEventSource,
+      getCachedResults,
+      readFluidSearchSetting,
+      saveSearchState,
+      setCachedResults,
+    ]
   );
 
   useEffect(() => {
@@ -168,16 +340,23 @@ export default function MangaSearchPage() {
     setSourceId(urlSourceId);
 
     if (!urlQuery) {
+      closeEventSource();
+      clearPendingResults();
       setResults([]);
+      setLoading(false);
       setHasSearched(false);
       setLastSearchedQuery('');
       setLastSearchedSourceId('');
+      setTotalSources(0);
+      setCompletedSources(0);
       setError('');
       return;
     }
 
-    void performSearch(urlQuery, urlSourceId);
-  }, [performSearch, restoreSearchState, urlQuery, urlSourceId]);
+    const forceRefresh = forceNextUrlSearchRef.current;
+    forceNextUrlSearchRef.current = false;
+    void performSearch(urlQuery, urlSourceId, { forceRefresh });
+  }, [clearPendingResults, closeEventSource, performSearch, restoreSearchState, urlQuery, urlSourceId]);
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -186,8 +365,13 @@ export default function MangaSearchPage() {
 
     const params = new URLSearchParams({ q: trimmedQuery });
     if (sourceId) params.set('sourceId', sourceId);
-    router.replace(`/manga/search?${params.toString()}`);
-    await performSearch(trimmedQuery, sourceId);
+    const nextUrl = `/manga/search?${params.toString()}`;
+    if (urlQuery === trimmedQuery && urlSourceId === sourceId) {
+      await performSearch(trimmedQuery, sourceId, { forceRefresh: true });
+    } else {
+      forceNextUrlSearchRef.current = true;
+      router.replace(nextUrl);
+    }
   };
 
   const returnTo = useMemo(() => {
@@ -256,11 +440,16 @@ export default function MangaSearchPage() {
       </form>
 
       <section>
-        <div className='mb-4 flex items-center justify-between'>
-          <h2 className='text-lg font-semibold'>搜索结果</h2>
+        <div className='mb-4 flex items-center justify-between gap-3'>
+          <h2 className='text-lg font-semibold'>搜索结果{results.length > 0 ? `（${results.length}）` : ''}</h2>
+          {loading && useFluidSearch && totalSources > 0 && (
+            <span className='text-xs text-gray-500 dark:text-gray-400'>
+              搜索中 {completedSources}/{totalSources}
+            </span>
+          )}
         </div>
         {error && <div className='mb-4 text-sm text-red-500'>{error}</div>}
-        {loading ? (
+        {loading && results.length === 0 ? (
           <div className='grid grid-cols-2 gap-4 md:grid-cols-4 xl:grid-cols-6'>
             {Array.from({ length: 12 }).map((_, index) => (
               <MangaCardSkeleton key={index} withButton />

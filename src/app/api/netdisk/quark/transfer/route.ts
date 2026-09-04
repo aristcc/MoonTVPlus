@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getConfig } from '@/lib/config';
 import { transferQuarkShare } from '@/lib/netdisk/quark.client';
+import { hasFeaturePermission } from '@/lib/permissions';
 
 export const runtime = 'nodejs';
 
@@ -11,6 +12,9 @@ export async function POST(request: NextRequest) {
     const authInfo = getAuthInfoFromCookie(request);
     if (!authInfo?.username) {
       return NextResponse.json({ error: '未登录' }, { status: 401 });
+    }
+    if (!(await hasFeaturePermission(authInfo.username, 'netdisk_transfer'))) {
+      return NextResponse.json({ error: '无权限使用网盘转存' }, { status: 403 });
     }
 
     const { shareUrl, passcode } = await request.json();

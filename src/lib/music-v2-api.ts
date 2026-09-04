@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { db } from '@/lib/db';
+import { hasFeaturePermission } from '@/lib/permissions';
 
 export async function getMusicV2Username(request: NextRequest): Promise<string | null> {
   const authInfo = getAuthInfoFromCookie(request);
@@ -12,6 +13,11 @@ export async function getMusicV2Username(request: NextRequest): Promise<string |
     if (!userInfo || userInfo.banned) {
       return null;
     }
+  }
+
+  const allowed = await hasFeaturePermission(authInfo.username, 'music');
+  if (!allowed) {
+    return null;
   }
 
   return authInfo.username;

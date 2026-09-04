@@ -2,6 +2,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
+import { validateKeywordExpr } from '@/lib/anime-keyword-expr';
 import { getConfig } from '@/lib/config';
 import { db } from '@/lib/db';
 import { AnimeSubscription } from '@/types/anime-subscription';
@@ -23,10 +24,14 @@ export async function GET(req: NextRequest) {
     const config = await getConfig();
     const animeConfig = config.AnimeSubscriptionConfig || {
       Enabled: false,
+      DownloadTool: 'aria2',
       Subscriptions: [],
     };
 
-    return NextResponse.json(animeConfig);
+    return NextResponse.json({
+      ...animeConfig,
+      DownloadTool: animeConfig.DownloadTool || 'aria2',
+    });
   } catch (error: any) {
     console.error('获取追番订阅配置失败:', error);
     return NextResponse.json(
@@ -48,8 +53,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: '无权限访问' }, { status: 403 });
     }
 
-    const { title, filterText, source, enabled, lastEpisode } =
-      await req.json();
+    const {
+      title,
+      filterText,
+      excludeText,
+      source,
+      enabled,
+      lastEpisode,
+      onePerEpisode,
+      refillMissingEpisodes,
+    } = await req.json();
 
     // 验证必填字段
     if (!title || !filterText || !source) {
@@ -57,13 +70,36 @@ export async function POST(req: NextRequest) {
     }
 
     // 验证 source
-    if (!['acgrip', 'mikan', 'dmhy'].includes(source)) {
+    if (!['acgrip', 'mikan', 'dmhy', 'nyaa'].includes(source)) {
       return NextResponse.json({ error: '无效的搜索源' }, { status: 400 });
+    }
+
+    const filterCheck = validateKeywordExpr(String(filterText), 'and');
+    if (!filterCheck.ok) {
+      return NextResponse.json(
+        { error: `过滤关键词表达式无效: ${filterCheck.error}` },
+        { status: 400 }
+      );
+    }
+    if (typeof excludeText === 'string' && excludeText.trim()) {
+      const excludeCheck = validateKeywordExpr(excludeText, 'or');
+      if (!excludeCheck.ok) {
+        return NextResponse.json(
+          { error: `排除关键词表达式无效: ${excludeCheck.error}` },
+          { status: 400 }
+        );
+      }
     }
 
     const config = await getConfig();
     if (!config.AnimeSubscriptionConfig) {
-      config.AnimeSubscriptionConfig = { Enabled: false, Subscriptions: [] };
+      config.AnimeSubscriptionConfig = {
+        Enabled: false,
+        DownloadTool: 'aria2',
+        Subscriptions: [],
+      };
+    } else if (!config.AnimeSubscriptionConfig.DownloadTool) {
+      config.AnimeSubscriptionConfig.DownloadTool = 'aria2';
     }
 
     // 验证集数
@@ -78,13 +114,34 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    const normalizedTitle = String(title).trim().replace(/\s+/g, ' ');
+    if (!normalizedTitle) {
+      return NextResponse.json({ error: '番剧名称不能为空' }, { status: 400 });
+    }
+
+    // 拒绝重复番剧名（忽略大小写与首尾空白）
+    const exists = (config.AnimeSubscriptionConfig.Subscriptions || []).some(
+      (sub) =>
+        sub.title.trim().replace(/\s+/g, ' ').toLowerCase() ===
+        normalizedTitle.toLowerCase()
+    );
+    if (exists) {
+      return NextResponse.json(
+        { error: `已存在同名追番订阅「${normalizedTitle}」，请勿重复添加` },
+        { status: 409 }
+      );
+    }
+
     // 创建新订阅
     const newSubscription: AnimeSubscription = {
       id: crypto.randomUUID(),
-      title: title.trim(),
+      title: normalizedTitle,
       filterText: filterText.trim(),
+      excludeText: typeof excludeText === 'string' ? excludeText.trim() : '',
       source,
       enabled: enabled ?? true,
+      onePerEpisode: Boolean(onePerEpisode),
+      refillMissingEpisodes: Boolean(refillMissingEpisodes),
       lastCheckTime: 0,
       lastEpisode: episodeNum,
       createdAt: Date.now(),

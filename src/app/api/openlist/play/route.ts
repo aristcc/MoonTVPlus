@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getConfig } from '@/lib/config';
+import { requireFeaturePermission } from '@/lib/permissions';
 import { OpenListClient } from '@/lib/openlist.client';
 
 export const runtime = 'nodejs';
@@ -65,6 +66,8 @@ async function getFinalUrl(url: string, maxRedirects = 5): Promise<string> {
  */
 export async function GET(request: NextRequest) {
   try {
+    const authResult = await requireFeaturePermission(request, 'private_library', '无权限访问私人影库');
+    if (authResult instanceof NextResponse) return authResult;
     const authInfo = getAuthInfoFromCookie(request);
     if (!authInfo || !authInfo.username) {
       return NextResponse.json({ error: '未授权' }, { status: 401 });
@@ -95,6 +98,12 @@ export async function GET(request: NextRequest) {
     // folderName 已经是完整路径，直接使用
     const folderPath = folderName;
     const filePath = `${folderPath}/${fileName}`;
+
+    const { resolvePathMeta } = await import('@/lib/openlist-path-meta');
+    const pathMetaResolved = resolvePathMeta(
+      folderPath,
+      openListConfig.PathMeta
+    );
 
     const client = new OpenListClient(
       openListConfig.URL,
@@ -127,7 +136,11 @@ export async function GET(request: NextRequest) {
           throw new Error('获取到的播放链接为空');
         }
 
-        return NextResponse.json({ url: finalUrl });
+        return NextResponse.json({
+          url: finalUrl,
+          refresh14m: pathMetaResolved.refresh14m,
+          category: pathMetaResolved.category,
+        });
       }
 
       // 检查URL是否为空
@@ -180,6 +193,8 @@ export async function GET(request: NextRequest) {
         return NextResponse.json({
           url: resolvedQualities[0].url,
           qualities: resolvedQualities,
+          refresh14m: pathMetaResolved.refresh14m,
+          category: pathMetaResolved.category,
         });
       }
 
@@ -212,7 +227,11 @@ export async function GET(request: NextRequest) {
           throw new Error('获取到的播放链接为空');
         }
 
-        return NextResponse.json({ url: finalUrl });
+        return NextResponse.json({
+          url: finalUrl,
+          refresh14m: pathMetaResolved.refresh14m,
+          category: pathMetaResolved.category,
+        });
       }
 
       // 检查URL是否为空
