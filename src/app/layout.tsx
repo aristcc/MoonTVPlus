@@ -105,6 +105,8 @@ export default async function RootLayout({
   let progressThumbType = 'default';
   let progressThumbPresetId = '';
   let progressThumbCustomUrl = '';
+  let loadingStyle = 'talisman';
+  let rateBadgeStyle = 'flag';
   let enableRegistration = false;
   let requireRegistrationInviteCode = false;
   let loginRequireTurnstile = false;
@@ -138,6 +140,7 @@ export default async function RootLayout({
     process.env.LEGADO_ENABLED === 'true';
   let musicProxyEnabled = true;
   let advancedRecommendationEnabled = false;
+  let localSettingsSyncMode: 'off' | 'manual' | 'auto' = 'off';
   let userFeatureAccess =
     storageType === 'localstorage'
       ? await getUserFeatureAccess(process.env.USERNAME || 'localstorage-owner')
@@ -188,6 +191,20 @@ export default async function RootLayout({
     progressThumbType = config.ThemeConfig?.progressThumbType || 'default';
     progressThumbPresetId = config.ThemeConfig?.progressThumbPresetId || '';
     progressThumbCustomUrl = config.ThemeConfig?.progressThumbCustomUrl || '';
+    // 白名单兜底：值异常时回落到魔法阵（现行默认），避免三种款式都不显示
+    loadingStyle =
+      config.ThemeConfig?.loadingStyle === 'classic' ||
+      config.ThemeConfig?.loadingStyle === 'grid' ||
+      config.ThemeConfig?.loadingStyle === 'talisman'
+        ? config.ThemeConfig.loadingStyle
+        : 'talisman';
+    // 白名单兜底：值异常时回落到默认锦旗徽章
+    rateBadgeStyle =
+      config.ThemeConfig?.rateBadgeStyle === 'default' ||
+      config.ThemeConfig?.rateBadgeStyle === 'flag' ||
+      config.ThemeConfig?.rateBadgeStyle === 'medal'
+        ? config.ThemeConfig.rateBadgeStyle
+        : 'flag';
     enableRegistration = config.SiteConfig.EnableRegistration || false;
     requireRegistrationInviteCode =
       config.SiteConfig.RequireRegistrationInviteCode || false;
@@ -258,6 +275,11 @@ export default async function RootLayout({
     xiaoyaEnabled = !!(
       config.XiaoyaConfig?.Enabled && config.XiaoyaConfig?.ServerURL
     );
+    localSettingsSyncMode =
+      config.SiteConfig?.LocalSettingsSyncMode === 'manual' ||
+      config.SiteConfig?.LocalSettingsSyncMode === 'auto'
+        ? config.SiteConfig.LocalSettingsSyncMode
+        : 'off';
   }
 
   // 将运行时配置注入到全局 window 对象，供客户端在运行时读取
@@ -273,6 +295,7 @@ export default async function RootLayout({
   const runtimeConfig = {
     STORAGE_TYPE: runtimeStorageType,
     DISPLAY_STORAGE_TYPE: displayStorageType,
+    LOCAL_SETTINGS_SYNC_MODE: localSettingsSyncMode,
     DOUBAN_PROXY_TYPE: doubanProxyType,
     DOUBAN_PROXY: doubanProxy,
     DOUBAN_IMAGE_PROXY_TYPE: doubanImageProxyType,
@@ -341,10 +364,16 @@ export default async function RootLayout({
     NETDISK_TRANSFER_ENABLED: userFeatureAccess.netdisk_transfer,
     NETDISK_TEMP_PLAY_ENABLED: userFeatureAccess.netdisk_temp_play,
     FESTIVE_EFFECT_ENABLED: process.env.FESTIVE_EFFECT_ENABLED === 'true',
+    RATE_BADGE_STYLE: rateBadgeStyle,
   };
 
   return (
-    <html lang='zh-CN' data-moontvplus='1' suppressHydrationWarning>
+    <html
+      lang='zh-CN'
+      data-moontvplus='1'
+      data-loading-style={loadingStyle}
+      suppressHydrationWarning
+    >
       <head>
         {/* 配套 moontvplus-extension 识别指纹；仅本项目部署站应带此标记 */}
         <meta name='moontvplus-site' content='1' />

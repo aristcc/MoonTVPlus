@@ -4,12 +4,55 @@
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { SlidersHorizontal } from 'lucide-react';
+import {
+  closestCenter,
+  DndContext,
+  type DragEndEvent,
+  PointerSensor,
+  TouchSensor,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core';
+import {
+  restrictToParentElement,
+  restrictToVerticalAxis,
+} from '@dnd-kit/modifiers';
+import {
+  arrayMove,
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import { GripVertical, ImageOff, ListMusic, SlidersHorizontal, Trash2, X } from 'lucide-react';
 import AddToPlaylistModal from '@/components/AddToPlaylistModal';
 import Toast, { ToastProps } from '@/components/Toast';
 import LyricsPiPWindow from '@/components/LyricsPiPWindow';
+import MusicEmpty from '@/components/music/MusicEmpty';
 import MusicSidebarDrawer from '@/components/music/MusicSidebarDrawer';
+import {
+  MUSIC_ART_BROKEN,
+  MUSIC_COUNT,
+  MUSIC_DANGER_BUTTON,
+  MUSIC_ICON_BUTTON,
+  MUSIC_ICON_BUTTON_DANGER,
+  MUSIC_QUEUE_BODY,
+  MUSIC_QUEUE_GRIP,
+  MUSIC_QUEUE_HEAD,
+  MUSIC_QUEUE_ROW,
+  MUSIC_QUEUE_SHELL,
+  MUSIC_QUEUE_TITLE,
+  MUSIC_ROW_ART,
+  MUSIC_ROW_ARTIST,
+  MUSIC_ROW_INDEX,
+  MUSIC_ROW_NAME,
+  MUSIC_ROW_NAME_THEME,
+  MUSIC_ROW_PLAYING,
+  MUSIC_ROW_SOURCE,
+  MUSIC_ROW_TEXT,
+} from '@/components/music/tokens';
 import { useWatchRoomContextSafe } from '@/components/WatchRoomProvider';
+import { cn } from '@/lib/cn';
 import { getSourceDisplayLabel, normalizeSource, SourcePill } from '@/lib/music/shared';
 import type { MusicQuality, MusicSource, Song } from '@/lib/music/types';
 import type { MusicQueueItem, MusicSyncState } from '@/types/watch-room';
@@ -83,6 +126,110 @@ interface DbRecord {
 
 function getMusicQueueItemKey(song: { id: string; platform?: string }, fallbackPlatform = '') {
   return `${song.platform || fallbackPlatform}:${song.id}`;
+}
+
+// 播放列表里的一行。只有左侧握把能触发拖拽，整行点击仍然是“播放这首”。
+function SortablePlaylistRow({
+  song,
+  index,
+  isActive,
+  onPlay,
+  onDelete,
+}: {
+  song: Song;
+  /** 队列里的位次，渲染成 01/02 那种等宽序号。 */
+  index: number;
+  isActive: boolean;
+  onPlay: () => void;
+  onDelete: () => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: song.id });
+  const [coverFailed, setCoverFailed] = useState(false);
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    zIndex: isDragging ? 10 : undefined,
+  };
+
+  const cover = song.pic && !coverFailed ? song.pic : '';
+  const sourceLabel = getSourceDisplayLabel(song.platform);
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      role="button"
+      tabIndex={0}
+      aria-current={isActive ? 'true' : undefined}
+      onClick={onPlay}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onPlay();
+        }
+      }}
+      className={cn(
+        MUSIC_QUEUE_ROW,
+        isActive && MUSIC_ROW_PLAYING,
+        isDragging && 'opacity-90 shadow-lg shadow-black/40'
+      )}
+    >
+      {/* 握把自己吃掉点击：拖完松手也会冒一个 click 上来，不放行就会顺手播了这首。 */}
+      <button
+        type="button"
+        aria-label={`拖动调整《${song.name}》的顺序`}
+        onClick={(event) => event.stopPropagation()}
+        className={MUSIC_QUEUE_GRIP}
+        {...attributes}
+        {...listeners}
+      >
+        <GripVertical className="h-3.5 w-3.5" strokeWidth={2} />
+      </button>
+
+      <span className={MUSIC_ROW_INDEX}>{String(index + 1).padStart(2, '0')}</span>
+
+      <span className={MUSIC_ROW_ART}>
+        {cover ? (
+          <img
+            src={cover}
+            alt=""
+            loading="lazy"
+            referrerPolicy="no-referrer"
+            onError={() => setCoverFailed(true)}
+            className="h-full w-full object-cover"
+          />
+        ) : (
+          <span className={MUSIC_ART_BROKEN}>
+            <ImageOff className="h-3.5 w-3.5" strokeWidth={1.6} />
+          </span>
+        )}
+      </span>
+
+      <span className={MUSIC_ROW_TEXT}>
+        <span className={cn(MUSIC_ROW_NAME, isActive && MUSIC_ROW_NAME_THEME)}>
+          {song.name}
+        </span>
+        <span className={MUSIC_ROW_ARTIST}>{song.artist}</span>
+      </span>
+
+      <span className={MUSIC_ROW_SOURCE}>{sourceLabel}</span>
+
+      <button
+        type="button"
+        title="从列表移除"
+        aria-label={`从列表移除《${song.name}》`}
+        onClick={(event) => {
+          event.stopPropagation();
+          onDelete();
+        }}
+        className={MUSIC_ICON_BUTTON_DANGER}
+      >
+        <Trash2 className="h-3.5 w-3.5" strokeWidth={1.9} />
+      </button>
+    </div>
+  );
 }
 
 function AudioSpectrumCanvas({
@@ -275,6 +422,11 @@ export default function MusicClient({ children: _children }: { children?: React.
   const [playlist, setPlaylist] = useState<Song[]>([]); // 完整歌曲信息（用于显示）
   const [showPlaylist, setShowPlaylist] = useState(false);
   const [playlistIndex, setPlaylistIndex] = useState(-1); // 当前在播放列表中的索引
+  // 播放列表拖拽排序：仅握把可触发，触屏加短延迟避免与列表滚动打架
+  const playlistSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 5 } })
+  );
   const [showQualityMenu, setShowQualityMenu] = useState(false); // 音质选择菜单
   const [showAudioEffectsMenu, setShowAudioEffectsMenu] = useState(false);
   const [equalizerEnabled, setEqualizerEnabled] = useState(false);
@@ -1322,6 +1474,72 @@ export default function MusicClient({ children: _children }: { children?: React.
     void handleQualityChange(qualities[nextIndex]);
   };
 
+  // 拖拽调整播放顺序。playlist / playRecords 是下标严格对齐的并行数组，必须同步移动；
+  // playlistIndex 是裸下标，重排后要按当前播放歌曲的标识重新定位。
+  const handlePlaylistDragEnd = async (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+
+    const oldIndex = playlist.findIndex((song) => song.id === active.id);
+    const newIndex = playlist.findIndex((song) => song.id === over.id);
+    if (oldIndex < 0 || newIndex < 0) return;
+
+    const prevPlaylist = playlist;
+    const prevRecords = playRecords;
+    const prevIndex = playlistIndex;
+
+    const nextPlaylist = arrayMove(playlist, oldIndex, newIndex);
+    const nextRecords = arrayMove(playRecords, oldIndex, newIndex);
+    const activeSongId = playlist[playlistIndex]?.id;
+
+    setPlaylist(nextPlaylist);
+    setPlayRecords(nextRecords);
+    if (activeSongId) {
+      setPlaylistIndex(nextPlaylist.findIndex((song) => song.id === activeSongId));
+    }
+
+    try {
+      // 只上报被移动歌曲的新邻居，服务端取中值即可，无需重写整个队列
+      const response = await fetch('/api/music/v2/history', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          songId: String(active.id),
+          prevSongId: nextPlaylist[newIndex - 1]?.id,
+          nextSongId: nextPlaylist[newIndex + 1]?.id,
+        }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    } catch (error) {
+      console.error('保存播放顺序失败:', error);
+      setPlaylist(prevPlaylist);
+      setPlayRecords(prevRecords);
+      setPlaylistIndex(prevIndex);
+      setToast({ message: '保存播放顺序失败', type: 'error', onClose: () => setToast(null) });
+    }
+  };
+
+  const handleRemovePlaylistItem = async (index: number) => {
+    const song = playlist[index];
+    if (!song) return;
+
+    try {
+      await fetch(`/api/music/v2/history?songId=${encodeURIComponent(song.id)}`, { method: 'DELETE' });
+
+      setPlaylist(playlist.filter((_, i) => i !== index));
+      setPlayRecords(playRecords.filter((_, i) => i !== index));
+
+      // 如果删除的是当前播放的歌曲，调整索引
+      if (index === playlistIndex) {
+        setPlaylistIndex(-1);
+      } else if (index < playlistIndex) {
+        setPlaylistIndex(playlistIndex - 1);
+      }
+    } catch (error) {
+      console.error('删除播放记录失败:', error);
+    }
+  };
+
   // 清空播放记录
   const handleClearPlayRecords = () => {
     setConfirmModal({
@@ -2067,7 +2285,10 @@ export default function MusicClient({ children: _children }: { children?: React.
   }, [playlist, playRecords, currentSong, quality, currentSource]);
 
   return (
-    <div className="music-theme min-h-screen bg-zinc-950 text-white">
+    // 底色和字色都不在这里兜底：`.music-theme` 的渐变底写在 app/music/music.css 里，
+    // 那份进 SSR 样式表、首帧就在。别往这加 bg-* ——原来那个 bg-zinc-950 就是
+    // "先黑一下再变回来"的来源（styled-jsx 要等 hydration 才插进 head）。
+    <div className="music-theme min-h-screen">
       <>
       <style jsx global>{`
         @keyframes vinyl-spin {
@@ -2394,12 +2615,6 @@ export default function MusicClient({ children: _children }: { children?: React.
                     <path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z" />
                   </svg>
                 </button>
-                {showStreamBuffering && (
-                  <span className="absolute left-[calc(50%+4rem)] top-1/2 inline-flex -translate-y-1/2 items-center gap-1 whitespace-nowrap rounded-full bg-green-500/15 px-2 py-0.5 text-[10px] font-medium text-green-300">
-                    <span className="h-2 w-2 rounded-full bg-green-400 animate-pulse" />
-                    缓冲中
-                  </span>
-                )}
               </div>
 
               {/* Right Controls */}
@@ -2843,131 +3058,74 @@ export default function MusicClient({ children: _children }: { children?: React.
       {/* Playlist Modal */}
       {showPlaylist && (
         <div className="fixed inset-0 bg-black/90 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-          <div className="w-full max-w-2xl h-[90vh] md:h-auto max-h-[90vh] bg-zinc-900/95 rounded-2xl overflow-hidden border border-white/10 shadow-2xl flex flex-col">
-            {/* Header */}
-            <div className="relative h-16 bg-gradient-to-b from-zinc-800 to-zinc-900 shrink-0 flex items-center justify-between px-6">
-              <div className="flex items-center gap-3">
-                <h2 className="text-lg font-bold text-white">播放列表</h2>
-                <span className="text-xs text-zinc-500">({playlist.length})</span>
+          <div className={MUSIC_QUEUE_SHELL}>
+            <div className={MUSIC_QUEUE_HEAD}>
+              <div className="flex items-center gap-2.5">
+                <h2 className={MUSIC_QUEUE_TITLE}>播放列表</h2>
+                <span className={MUSIC_COUNT}>{playlist.length} 首</span>
               </div>
               <div className="flex items-center gap-2">
                 {playlist.length > 0 && (
                   <button
+                    type="button"
                     onClick={handleClearPlayRecords}
-                    className="px-3 py-1 text-xs rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors border border-red-500/50"
+                    className={MUSIC_DANGER_BUTTON}
                     title="清空全部"
                   >
                     清空
                   </button>
                 )}
                 <button
+                  type="button"
                   onClick={() => setShowPlaylist(false)}
-                  className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center transition-colors"
+                  className={MUSIC_ICON_BUTTON}
+                  title="关闭"
+                  aria-label="关闭播放列表"
                 >
-                  <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-                  </svg>
+                  <X className="h-4 w-4" strokeWidth={2} />
                 </button>
               </div>
             </div>
 
             {/* Playlist */}
-            <div className="flex-1 overflow-y-auto p-4 md:p-6">
+            <div className={MUSIC_QUEUE_BODY}>
               {playlist.length > 0 ? (
-                <div className="space-y-2">
-                  {playlist.map((song, index) => (
-                    <div
-                      key={`${song.id}-${index}`}
-                      className={`flex items-center gap-3 p-3 rounded-lg transition-colors group ${
-                        index === playlistIndex
-                          ? 'bg-green-500/20 border border-green-500/50'
-                          : 'bg-white/5 hover:bg-white/10'
-                      }`}
-                    >
-                      <div
-                        onClick={() => {
-                          setPlaylistIndex(index);
-                          playSong(song, -1);
-                          setShowPlaylist(false);
-                        }}
-                        className="flex items-center gap-3 flex-1 min-w-0 cursor-pointer"
-                      >
-                        <div className="w-12 h-12 rounded-lg bg-zinc-800 overflow-hidden shrink-0">
-                          {song.pic ? (
-                            <img
-                              src={song.pic}
-                              alt={song.name}
-                              className="w-full h-full object-cover"
-                            />
-                          ) : (
-                            <div className="w-full h-full flex items-center justify-center">
-                              <svg className="w-6 h-6 text-zinc-600" fill="currentColor" viewBox="0 0 20 20">
-                                <path d="M18 3a1 1 0 00-1.196-.98l-10 2A1 1 0 006 5v9.114A4.369 4.369 0 005 14c-1.657 0-3 .895-3 2s1.343 2 3 2 3-.895 3-2V7.82l8-1.6v5.894A4.37 4.37 0 0015 12c-1.657 0-3 .895-3 2s1.343 2 3 2 3-.895 3-2V3z" />
-                              </svg>
-                            </div>
-                          )}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 min-w-0">
-                            <div className={`text-sm font-medium truncate transition-colors ${
-                              index === playlistIndex ? 'text-green-400' : 'text-white group-hover:text-green-400'
-                            }`}>
-                              {song.name}
-                            </div>
-                            <SourcePill source={song.platform} variant="accent" />
-                          </div>
-                          <div className="text-xs text-zinc-500 truncate">{song.artist}</div>
-                        </div>
-                        {index === playlistIndex ? (
-                          <svg className="w-5 h-5 text-green-400 shrink-0 animate-pulse" fill="currentColor" viewBox="0 0 20 20">
-                            <path d="M18 3a1 1 0 00-1.196-.98l-10 2A1 1 0 006 5v9.114A4.369 4.369 0 005 14c-1.657 0-3 .895-3 2s1.343 2 3 2 3-.895 3-2V7.82l8-1.6v5.894A4.37 4.37 0 0015 12c-1.657 0-3 .895-3 2s1.343 2 3 2 3-.895 3-2V3z" />
-                          </svg>
-                        ) : (
-                          <svg className="w-5 h-5 text-zinc-600 group-hover:text-white transition-colors shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                            <path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z" />
-                          </svg>
-                        )}
-                      </div>
-                      <button
-                        onClick={async (e) => {
-                          e.stopPropagation();
-                          try {
-                            await fetch(`/api/music/v2/history?songId=${encodeURIComponent(song.id)}`, { method: 'DELETE' });
-
-                            // 更新本地状态
-                            const newPlaylist = playlist.filter((_, i) => i !== index);
-                            const newRecords = playRecords.filter((_, i) => i !== index);
-                            setPlaylist(newPlaylist);
-                            setPlayRecords(newRecords);
-
-                            // 如果删除的是当前播放的歌曲，调整索引
-                            if (index === playlistIndex) {
-                              setPlaylistIndex(-1);
-                            } else if (index < playlistIndex) {
-                              setPlaylistIndex(playlistIndex - 1);
-                            }
-                          } catch (error) {
-                            console.error('删除播放记录失败:', error);
-                          }
-                        }}
-                        className="w-8 h-8 rounded-lg border border-red-500/30 bg-red-500/15 hover:bg-red-500/30 flex items-center justify-center transition-colors opacity-100 shrink-0"
-                        title="删除"
-                      >
-                        <svg className="w-4 h-4 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                        </svg>
-                      </button>
+                <DndContext
+                  sensors={playlistSensors}
+                  collisionDetection={closestCenter}
+                  onDragEnd={handlePlaylistDragEnd}
+                  modifiers={[restrictToVerticalAxis, restrictToParentElement]}
+                >
+                  <SortableContext
+                    items={playlist.map((song) => song.id)}
+                    strategy={verticalListSortingStrategy}
+                  >
+                    <div className="flex flex-col">
+                      {playlist.map((song, index) => (
+                        <SortablePlaylistRow
+                          key={song.id}
+                          song={song}
+                          index={index}
+                          isActive={index === playlistIndex}
+                          onPlay={() => {
+                            setPlaylistIndex(index);
+                            playSong(song, -1);
+                            setShowPlaylist(false);
+                          }}
+                          onDelete={() => {
+                            void handleRemovePlaylistItem(index);
+                          }}
+                        />
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  </SortableContext>
+                </DndContext>
               ) : (
-                <div className="flex flex-col items-center justify-center h-full text-center">
-                  <svg className="w-16 h-16 text-zinc-700 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
-                  </svg>
-                  <p className="text-zinc-500 text-sm">播放列表为空</p>
-                  <p className="text-zinc-600 text-xs mt-2">播放歌曲后会自动添加到列表</p>
-                </div>
+                <MusicEmpty
+                  icon={ListMusic}
+                  title="播放列表是空的"
+                  hint="播放歌曲后会自动进列表。"
+                />
               )}
             </div>
           </div>
@@ -3387,100 +3545,6 @@ export default function MusicClient({ children: _children }: { children?: React.
           onClose={() => setShowPiPLyrics(false)}
         />
       )}
-      <style jsx global>{`
-        :root {
-          --music-bg: #f4f7fb;
-          --music-bg-strong: rgba(255, 255, 255, 0.96);
-          --music-surface: rgba(255, 255, 255, 0.88);
-          --music-surface-soft: rgba(241, 245, 249, 0.92);
-          --music-overlay: rgba(15, 23, 42, 0.45);
-          --music-glass: rgba(15, 23, 42, 0.06);
-          --music-glass-strong: rgba(15, 23, 42, 0.1);
-          --music-border: rgba(148, 163, 184, 0.28);
-          --music-text: #0f172a;
-          --music-text-soft: #475569;
-          --music-text-muted: #64748b;
-        }
-
-        .dark {
-          --music-bg: #09090b;
-          --music-bg-strong: rgba(9, 9, 11, 0.95);
-          --music-surface: rgba(24, 24, 27, 0.9);
-          --music-surface-soft: rgba(39, 39, 42, 0.88);
-          --music-overlay: rgba(0, 0, 0, 0.72);
-          --music-glass: rgba(255, 255, 255, 0.05);
-          --music-glass-strong: rgba(255, 255, 255, 0.1);
-          --music-border: rgba(255, 255, 255, 0.1);
-          --music-text: #f8fafc;
-          --music-text-soft: #cbd5e1;
-          --music-text-muted: #94a3b8;
-        }
-
-        .music-theme {
-          background: linear-gradient(180deg, var(--music-bg) 0%, color-mix(in srgb, var(--music-bg) 82%, #22c55e 18%) 100%);
-          color: var(--music-text);
-        }
-
-        .music-theme :is([class*='bg-zinc-950'], [class*='bg-zinc-900']),
-        .music-theme-portal :is([class*='bg-zinc-950'], [class*='bg-zinc-900']) {
-          background-color: var(--music-bg-strong) !important;
-        }
-
-        .music-theme [class*='bg-zinc-800'],
-        .music-theme-portal [class*='bg-zinc-800'] {
-          background-color: var(--music-surface-soft) !important;
-        }
-
-        .music-theme :is([class*='bg-white/5'], [class*='bg-white/6'], [class*='bg-white/8'], [class*='bg-white/10'], [class*='bg-white/12']),
-        .music-theme-portal :is([class*='bg-white/5'], [class*='bg-white/6'], [class*='bg-white/8'], [class*='bg-white/10'], [class*='bg-white/12']) {
-          background-color: var(--music-glass) !important;
-        }
-
-        .music-theme [class*='bg-white/20'],
-        .music-theme-portal [class*='bg-white/20'] {
-          background-color: var(--music-glass-strong) !important;
-        }
-
-        .music-theme :is([class*='bg-black/90'], [class*='bg-black/50'], [class*='bg-black/30']),
-        .music-theme-portal :is([class*='bg-black/90'], [class*='bg-black/50'], [class*='bg-black/30']) {
-          background-color: var(--music-overlay) !important;
-        }
-
-        .music-theme :is([class*='border-white/'], [class*='border-zinc-']),
-        .music-theme-portal :is([class*='border-white/'], [class*='border-zinc-']) {
-          border-color: var(--music-border) !important;
-        }
-
-        .music-theme :is([class*='text-white'], [class*='text-zinc-200']),
-        .music-theme-portal :is([class*='text-white'], [class*='text-zinc-200']) {
-          color: var(--music-text) !important;
-        }
-
-        .music-theme :is([class*='text-zinc-300'], [class*='text-zinc-400']),
-        .music-theme-portal :is([class*='text-zinc-300'], [class*='text-zinc-400']) {
-          color: var(--music-text-soft) !important;
-        }
-
-        .music-theme :is([class*='text-zinc-500'], [class*='text-zinc-600']),
-        .music-theme-portal :is([class*='text-zinc-500'], [class*='text-zinc-600']) {
-          color: var(--music-text-muted) !important;
-        }
-
-        .music-theme :is([class*='from-zinc-800'], [class*='from-zinc-900']) {
-          --tw-gradient-from: var(--music-surface-soft) var(--tw-gradient-from-position) !important;
-          --tw-gradient-to: rgb(255 255 255 / 0) var(--tw-gradient-to-position) !important;
-          --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
-        }
-
-        .music-theme :is([class*='to-zinc-900'], [class*='to-zinc-800']) {
-          --tw-gradient-to: var(--music-bg-strong) var(--tw-gradient-to-position) !important;
-        }
-
-        .music-theme input::placeholder,
-        .music-theme textarea::placeholder {
-          color: var(--music-text-muted) !important;
-        }
-      `}</style>
       </>
     </div>
   );
