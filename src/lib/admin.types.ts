@@ -40,7 +40,9 @@ export interface AdminConfig {
     BangumiProxy?: string;
     LiveChartProxy?: string;
     BannerDataSource?: string; // 轮播图数据源：TMDB、TX 或 Douban
-    RecommendationDataSource?: string; // 更多推荐数据源：Douban、TMDB、Mixed、MixedSmart
+    RecommendationDataSource?: string; // 更多推荐数据源：Douban、TMDB、Mixed
+    // 本地设置云同步模式：off=关闭，manual=手动（面板右上角备份/恢复按钮），auto=自动（进入网站静默拉取、面板打开静默同步）
+    LocalSettingsSyncMode?: 'off' | 'manual' | 'auto';
     // Pansou配置
     PansouApiUrl?: string;
     PansouUsername?: string;
@@ -155,6 +157,10 @@ export interface AdminConfig {
     progressThumbType?: 'default' | 'preset' | 'custom'; // 图标类型
     progressThumbPresetId?: string; // 预制图标ID
     progressThumbCustomUrl?: string; // 自定义图标URL
+    // 初始化加载样式：播放页/直播页首屏加载动画的款式
+    loadingStyle?: 'classic' | 'grid' | 'talisman';
+    // 评分星标样式：视频卡片右上角评分徽章的款式
+    rateBadgeStyle?: 'default' | 'flag' | 'medal';
   };
   OpenListConfig?: {
     Enabled: boolean; // 是否启用私人影库功能
@@ -181,6 +187,8 @@ export interface AdminConfig {
       [path: string]: {
         category: string; // 分类名
         refresh14m: boolean; // 该路径播放时是否启用 14 分钟 URL 续期
+        proxyPlay: boolean; // 该路径播放链接是否使用服务器代理播放
+        proxyCacheMinutes: number; // 代理播放时链接最终重定向的缓存时长（分钟），默认 60
       };
     };
   };
@@ -263,6 +271,7 @@ export interface AdminConfig {
     EnableVideoCardEntry: boolean; // VideoCard入口开关
     EnablePlayPageEntry: boolean; // 播放页入口开关
     EnableAIComments: boolean; // AI评论生成开关
+    EnableAICommentsToolMode?: boolean; // AI评论走工具式调用（模型自主联网/查豆瓣/TMDB），默认关闭
     // 高级设置
     Temperature?: number; // AI温度参数（0-2），默认0.7
     MaxTokens?: number; // 最大回复token数，默认1000
@@ -415,6 +424,8 @@ export interface AdminConfig {
       onePerEpisode?: boolean;
       /** 缺集重新检索（默认 false） */
       refillMissingEpisodes?: boolean;
+      /** 自定义集数提取正则（留空用内置规则，首个捕获组作为集数） */
+      episodeRegex?: string;
       lastCheckTime: number;
       lastEpisode: number;
       createdAt: number;
