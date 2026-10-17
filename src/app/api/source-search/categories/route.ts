@@ -9,6 +9,7 @@ export const runtime = 'nodejs';
 interface CmsClassResponse {
   class?: Array<{
     type_id: string | number;
+    type_pid?: string | number;
     type_name: string;
   }>;
 }
@@ -24,7 +25,7 @@ export async function GET(request: NextRequest) {
 
   const { searchParams } = new URL(request.url);
   const sourceKey = searchParams.get('source');
-  const includeSpecialSources = searchParams.get('special') === '1';
+  const specialOnly = searchParams.get('special') === '1';
 
   if (!sourceKey) {
     return NextResponse.json(
@@ -35,7 +36,7 @@ export async function GET(request: NextRequest) {
 
   try {
     const config = await getConfig();
-    const apiSites = await getAvailableApiSites(authInfo.username, includeSpecialSources);
+    const apiSites = await getAvailableApiSites(authInfo.username, specialOnly);
     const targetSite = apiSites.find((site) => site.key === sourceKey);
 
     if (!targetSite) {
@@ -77,6 +78,8 @@ export async function GET(request: NextRequest) {
       categories: filteredCategories.map((item) => ({
         id: item.type_id.toString(),
         name: item.type_name,
+        // 一级分类 type_pid 为 0，二级分类指向父分类 id
+        pid: (item.type_pid ?? 0).toString(),
       })),
     });
   } catch (error) {
