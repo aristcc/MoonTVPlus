@@ -260,7 +260,13 @@ const AlertModal = ({
                 确定
               </button>
             )
-          ) : null}
+          ) : timer ? null : (
+            // 既没有确认框、也没有自动关闭定时器时兜底一个关闭按钮，
+            // 否则这类提示弹窗没有任何关闭途径（点背景也不关）。
+            <button onClick={onClose} className={buttonStyles.primary}>
+              确定
+            </button>
+          )}
         </div>
       </div>
     </div>,
@@ -386,6 +392,7 @@ interface SiteConfig {
   LiveChartProxy?: string;
   BannerDataSource?: string;
   RecommendationDataSource?: string;
+  LocalSettingsSyncMode?: 'off' | 'manual' | 'auto';
   PansouApiUrl?: string;
   PansouUsername?: string;
   PansouPassword?: string;
@@ -3483,7 +3490,13 @@ const OpenListConfigComponent = ({
   );
   const [disableVideoPreview, setDisableVideoPreview] = useState(false);
   const [pathMetaRows, setPathMetaRows] = useState<
-    Array<{ path: string; category: string; refresh14m: boolean }>
+    Array<{
+      path: string;
+      category: string;
+      refresh14m: boolean;
+      proxyPlay: boolean;
+      proxyCacheMinutes: number;
+    }>
   >([]);
   const [videos, setVideos] = useState<any[]>([]);
   const [refreshing, setRefreshing] = useState(false);
@@ -3495,6 +3508,9 @@ const OpenListConfigComponent = ({
   const [correctDialogOpen, setCorrectDialogOpen] = useState(false);
   const [selectedVideo, setSelectedVideo] = useState<any | null>(null);
   const [pathMetaDialogOpen, setPathMetaDialogOpen] = useState(false);
+  const [pathMetaExpanded, setPathMetaExpanded] = useState<Set<number>>(
+    new Set()
+  );
 
   useEffect(() => {
     if (config?.OpenListConfig) {
@@ -3530,6 +3546,12 @@ const OpenListConfigComponent = ({
           path,
           category: meta?.category || '',
           refresh14m: Boolean(meta?.refresh14m),
+          proxyPlay: Boolean(meta?.proxyPlay),
+          proxyCacheMinutes:
+            typeof meta?.proxyCacheMinutes === 'number' &&
+            meta.proxyCacheMinutes > 0
+              ? meta.proxyCacheMinutes
+              : 60,
         }))
       );
     }
@@ -3572,13 +3594,24 @@ const OpenListConfigComponent = ({
         }
         const pathMetaPayload: Record<
           string,
-          { category: string; refresh14m: boolean }
+          {
+            category: string;
+            refresh14m: boolean;
+            proxyPlay: boolean;
+            proxyCacheMinutes: number;
+          }
         > = {};
         for (const row of pathMetaRows) {
           const p = (row.path || '').trim();
           pathMetaPayload[p] = {
             category: (row.category || '').trim(),
             refresh14m: Boolean(row.refresh14m),
+            proxyPlay: Boolean(row.proxyPlay),
+            proxyCacheMinutes:
+              typeof row.proxyCacheMinutes === 'number' &&
+              row.proxyCacheMinutes > 0
+                ? Math.min(Math.max(Math.round(row.proxyCacheMinutes), 1), 1440)
+                : 60,
           };
         }
 
@@ -4111,7 +4144,8 @@ const OpenListConfigComponent = ({
               路径元信息
             </h3>
             <p className='text-xs text-gray-500 dark:text-gray-400 mt-1'>
-              为指定路径下的影片设置分类，以及播放时是否自动刷新链接（约 14 分钟）
+              为指定路径下的影片设置分类、播放时是否自动刷新链接（约 14 分钟），
+              以及是否通过服务器代理播放（可配置链接缓存时长）
               {pathMetaRows.length > 0
                 ? ` · 已配置 ${pathMetaRows.length} 条`
                 : ''}
@@ -4168,101 +4202,223 @@ const OpenListConfigComponent = ({
                       暂无配置，点击下方「添加」开始
                     </p>
                   ) : (
-                    pathMetaRows.map((row, index) => (
-                      <div
-                        key={index}
-                        className='grid grid-cols-1 md:grid-cols-12 gap-2 items-center'
-                      >
-                        <div className='md:col-span-5'>
-                          <input
-                            type='text'
-                            value={row.path}
-                            onChange={(e) => {
-                              const value = e.target.value;
-                              setPathMetaRows((rows) =>
-                                rows.map((r, i) =>
-                                  i === index ? { ...r, path: value } : r
-                                )
-                              );
-                            }}
-                            placeholder='路径，如 /videos'
-                            className='w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent'
-                          />
-                        </div>
-                        <div className='md:col-span-3'>
-                          <input
-                            type='text'
-                            value={row.category}
-                            onChange={(e) => {
-                              const value = e.target.value;
-                              setPathMetaRows((rows) =>
-                                rows.map((r, i) =>
-                                  i === index ? { ...r, category: value } : r
-                                )
-                              );
-                            }}
-                            placeholder='分类，如 动漫'
-                            className='w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent'
-                          />
-                        </div>
-                        <div className='md:col-span-3 flex items-center gap-2'>
-                          <span className='text-sm text-gray-700 dark:text-gray-300 whitespace-nowrap'>
-                            播放自动刷新
-                          </span>
-                          <button
-                            type='button'
-                            onClick={() =>
-                              setPathMetaRows((rows) =>
-                                rows.map((r, i) =>
-                                  i === index
-                                    ? { ...r, refresh14m: !r.refresh14m }
-                                    : r
-                                )
-                              )
-                            }
-                            className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors ${
-                              row.refresh14m
-                                ? 'bg-blue-600'
-                                : 'bg-gray-200 dark:bg-gray-700'
-                            }`}
-                            aria-label='播放自动刷新'
-                          >
-                            <span
-                              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                                row.refresh14m
-                                  ? 'translate-x-6'
-                                  : 'translate-x-1'
-                              }`}
+                    pathMetaRows.map((row, index) => {
+                      const expanded = pathMetaExpanded.has(index);
+                      return (
+                        <div
+                          key={index}
+                          className='border border-gray-200 dark:border-gray-700 rounded-lg'
+                        >
+                          {/* 折叠头部：路径 + 展开箭头 + 删除 */}
+                          <div className='flex items-center gap-2 px-3 py-2'>
+                            <button
+                              type='button'
+                              onClick={() =>
+                                setPathMetaExpanded((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(index)) {
+                                    next.delete(index);
+                                  } else {
+                                    next.add(index);
+                                  }
+                                  return next;
+                                })
+                              }
+                              className='flex-shrink-0 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+                              aria-label={expanded ? '收起' : '展开'}
+                            >
+                              {expanded ? (
+                                <ChevronUp className='h-4 w-4' />
+                              ) : (
+                                <ChevronDown className='h-4 w-4' />
+                              )}
+                            </button>
+                            <input
+                              type='text'
+                              value={row.path}
+                              onChange={(e) => {
+                                const value = e.target.value;
+                                setPathMetaRows((rows) =>
+                                  rows.map((r, i) =>
+                                    i === index ? { ...r, path: value } : r
+                                  )
+                                );
+                              }}
+                              placeholder='路径，如 /videos'
+                              className='flex-1 min-w-0 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent'
                             />
-                          </button>
+                            <button
+                              type='button'
+                              onClick={() =>
+                                setPathMetaRows((rows) =>
+                                  rows.filter((_, i) => i !== index)
+                                )
+                              }
+                              className='flex-shrink-0 px-2 py-1 text-sm text-red-600 hover:text-red-700 dark:text-red-400'
+                            >
+                              删除
+                            </button>
+                          </div>
+
+                          {/* 展开配置区：分类、自动刷新、代理播放、代理缓存时长 */}
+                          {expanded && (
+                            <div className='border-t border-gray-200 dark:border-gray-700 px-3 py-3 space-y-3'>
+                              <div>
+                                <label className='block text-xs text-gray-500 dark:text-gray-400 mb-1'>
+                                  分类
+                                </label>
+                                <input
+                                  type='text'
+                                  value={row.category}
+                                  onChange={(e) => {
+                                    const value = e.target.value;
+                                    setPathMetaRows((rows) =>
+                                      rows.map((r, i) =>
+                                        i === index
+                                          ? { ...r, category: value }
+                                          : r
+                                      )
+                                    );
+                                  }}
+                                  placeholder='分类，如 动漫'
+                                  className='w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent'
+                                />
+                              </div>
+
+                              <div className='flex items-center justify-between'>
+                                <span className='text-sm text-gray-700 dark:text-gray-300'>
+                                  播放自动刷新
+                                  <span className='block text-xs text-gray-400 dark:text-gray-500'>
+                                    播放时约 14 分钟自动刷新链接
+                                  </span>
+                                </span>
+                                <button
+                                  type='button'
+                                  onClick={() =>
+                                    setPathMetaRows((rows) =>
+                                      rows.map((r, i) =>
+                                        i === index
+                                          ? {
+                                              ...r,
+                                              refresh14m: !r.refresh14m,
+                                            }
+                                          : r
+                                      )
+                                    )
+                                  }
+                                  className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors ${
+                                    row.refresh14m
+                                      ? 'bg-blue-600'
+                                      : 'bg-gray-200 dark:bg-gray-700'
+                                  }`}
+                                  aria-label='播放自动刷新'
+                                >
+                                  <span
+                                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                      row.refresh14m
+                                        ? 'translate-x-6'
+                                        : 'translate-x-1'
+                                    }`}
+                                  />
+                                </button>
+                              </div>
+
+                              <div className='flex items-center justify-between'>
+                                <span className='text-sm text-gray-700 dark:text-gray-300'>
+                                  代理播放
+                                  <span className='block text-xs text-gray-400 dark:text-gray-500'>
+                                    播放链接通过服务器代理
+                                  </span>
+                                </span>
+                                <button
+                                  type='button'
+                                  onClick={() =>
+                                    setPathMetaRows((rows) =>
+                                      rows.map((r, i) =>
+                                        i === index
+                                          ? {
+                                              ...r,
+                                              proxyPlay: !r.proxyPlay,
+                                            }
+                                          : r
+                                      )
+                                    )
+                                  }
+                                  className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors ${
+                                    row.proxyPlay
+                                      ? 'bg-blue-600'
+                                      : 'bg-gray-200 dark:bg-gray-700'
+                                  }`}
+                                  aria-label='代理播放'
+                                >
+                                  <span
+                                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                      row.proxyPlay
+                                        ? 'translate-x-6'
+                                        : 'translate-x-1'
+                                    }`}
+                                  />
+                                </button>
+                              </div>
+
+                              <div className='flex items-center gap-2'>
+                                <label className='text-sm text-gray-700 dark:text-gray-300 whitespace-nowrap'>
+                                  代理缓存时长（分钟）
+                                </label>
+                                <input
+                                  type='number'
+                                  min={1}
+                                  max={1440}
+                                  value={row.proxyCacheMinutes}
+                                  onChange={(e) => {
+                                    const value = parseInt(e.target.value, 10);
+                                    setPathMetaRows((rows) =>
+                                      rows.map((r, i) =>
+                                        i === index
+                                          ? {
+                                              ...r,
+                                              proxyCacheMinutes:
+                                                Number.isFinite(value)
+                                                  ? value
+                                                  : 60,
+                                            }
+                                          : r
+                                      )
+                                    );
+                                  }}
+                                  placeholder='60'
+                                  className='w-24 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent'
+                                />
+                              </div>
+                            </div>
+                          )}
                         </div>
-                        <div className='md:col-span-1 flex justify-end'>
-                          <button
-                            type='button'
-                            onClick={() =>
-                              setPathMetaRows((rows) =>
-                                rows.filter((_, i) => i !== index)
-                              )
-                            }
-                            className='px-2 py-1 text-sm text-red-600 hover:text-red-700 dark:text-red-400'
-                          >
-                            删除
-                          </button>
-                        </div>
-                      </div>
-                    ))
+                      );
+                    })
                   )}
                 </div>
 
                 <div className='flex items-center justify-between gap-3 px-5 py-4 border-t border-gray-200 dark:border-gray-700'>
                   <button
                     type='button'
-                    onClick={() =>
+                    onClick={() => {
                       setPathMetaRows((rows) => [
                         ...rows,
-                        { path: '', category: '', refresh14m: false },
-                      ])
-                    }
+                        {
+                          path: '',
+                          category: '',
+                          refresh14m: false,
+                          proxyPlay: false,
+                          proxyCacheMinutes: 60,
+                        },
+                      ]);
+                      // 新添加的行默认展开，便于直接配置
+                      setPathMetaExpanded((prev) => {
+                        const next = new Set(prev);
+                        next.add(pathMetaRows.length);
+                        return next;
+                      });
+                    }}
                     className={buttonStyles.primary}
                   >
                     添加
@@ -6591,6 +6747,24 @@ const VideoSourceConfig = ({
     }>
   >([]);
 
+  // 一键批量操作的目标源：已禁用的、检测为无效的、检测为无法搜索的
+  const disabledSourceKeys = useMemo(
+    () => sources.filter((s) => s.disabled).map((s) => s.key),
+    [sources]
+  );
+  const invalidSourceKeys = useMemo(
+    () =>
+      validationResults.filter((r) => r.status === 'invalid').map((r) => r.key),
+    [validationResults]
+  );
+  const noResultSourceKeys = useMemo(
+    () =>
+      validationResults
+        .filter((r) => r.status === 'no_results')
+        .map((r) => r.key),
+    [validationResults]
+  );
+
   // dnd-kit 传感器
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -7546,6 +7720,62 @@ const VideoSourceConfig = ({
     });
   };
 
+  // 一键批量：不依赖勾选，直接对给定的 keys 走已有的 batch_enable / batch_disable
+  const handleQuickBatch = (
+    action: 'batch_enable' | 'batch_disable',
+    keys: string[],
+    actionName: string,
+    emptyMessage: string
+  ) => {
+    const closeConfirm = () =>
+      setConfirmModal({
+        isOpen: false,
+        title: '',
+        message: '',
+        onConfirm: () => {},
+        onCancel: () => {},
+      });
+
+    if (keys.length === 0) {
+      showAlert({
+        type: 'warning',
+        title: `没有需要${
+          action === 'batch_enable' ? '启用' : '禁用'
+        }的视频源`,
+        message: emptyMessage,
+      });
+      return;
+    }
+
+    setConfirmModal({
+      isOpen: true,
+      title: '确认操作',
+      message: `确定要${actionName}吗？共 ${keys.length} 个视频源。`,
+      onConfirm: async () => {
+        try {
+          await withLoading(`batchSource_${action}`, () =>
+            callSourceApi({ action, keys })
+          );
+          showAlert({
+            type: 'success',
+            title: `${actionName}成功`,
+            message: `已处理 ${keys.length} 个视频源`,
+            timer: 2000,
+          });
+          setSelectedSources(new Set());
+        } catch (err) {
+          showAlert({
+            type: 'error',
+            title: `${actionName}失败`,
+            message: err instanceof Error ? err.message : '操作失败',
+          });
+        }
+        closeConfirm();
+      },
+      onCancel: closeConfirm,
+    });
+  };
+
   if (!config) {
     return (
       <div className='text-center text-gray-500 dark:text-gray-400'>
@@ -7558,10 +7788,10 @@ const VideoSourceConfig = ({
     <div className='space-y-6'>
       {/* 添加视频源表单 */}
       <div className='flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4'>
-        <h4 className='text-sm font-medium text-gray-700 dark:text-gray-300'>
+        <h4 className='shrink-0 whitespace-nowrap text-sm font-medium text-gray-700 dark:text-gray-300'>
           视频源列表
         </h4>
-        <div className='flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-2'>
+        <div className='flex min-w-0 flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-end sm:gap-2'>
           {/* 批量操作按钮 - 移动端显示在下一行，PC端显示在左侧 */}
           {selectedSources.size > 0 && (
             <>
@@ -7615,9 +7845,9 @@ const VideoSourceConfig = ({
               <div className='hidden sm:block w-px h-6 bg-gray-300 dark:bg-gray-600 order-2'></div>
             </>
           )}
-          <div className='flex w-full flex-col gap-2 order-1 sm:order-2 sm:w-auto sm:flex-row sm:items-center sm:gap-2'>
-            <div className='w-full overflow-x-auto sm:w-auto'>
-              <div className='ml-auto flex w-max items-center gap-2 whitespace-nowrap'>
+          <div className='flex w-full min-w-0 flex-col gap-2 order-1 sm:order-2 sm:w-auto sm:flex-row sm:flex-wrap sm:items-center sm:justify-end sm:gap-2'>
+            <div className='w-full min-w-0 sm:w-auto'>
+              <div className='flex flex-wrap items-center justify-end gap-2'>
                 <button
                   onClick={openSpecialSourcesModal}
                   className={`${buttonStyles.secondary} flex shrink-0 items-center gap-1.5 whitespace-nowrap`}
@@ -7654,8 +7884,8 @@ const VideoSourceConfig = ({
                 </button>
               </div>
             </div>
-            <div className='w-full overflow-x-auto sm:w-auto'>
-              <div className='ml-auto flex w-max items-center gap-2 whitespace-nowrap'>
+            <div className='w-full min-w-0 sm:w-auto'>
+              <div className='flex flex-wrap items-center justify-end gap-2'>
                 <button
                   onClick={() => setShowValidationModal(true)}
                   disabled={isValidating}
@@ -7670,6 +7900,86 @@ const VideoSourceConfig = ({
                     </>
                   ) : (
                     '有效性检测'
+                  )}
+                </button>
+                <button
+                  onClick={() =>
+                    handleQuickBatch(
+                      'batch_enable',
+                      disabledSourceKeys,
+                      '启用全部源',
+                      '所有视频源都已处于启用状态'
+                    )
+                  }
+                  disabled={isLoading('batchSource_batch_enable')}
+                  className={`${
+                    isLoading('batchSource_batch_enable')
+                      ? buttonStyles.disabled
+                      : buttonStyles.success
+                  } flex shrink-0 items-center gap-1.5 whitespace-nowrap`}
+                  title='把所有已禁用的视频源一键启用'
+                >
+                  <span>
+                    {isLoading('batchSource_batch_enable')
+                      ? '启用中...'
+                      : '启用全部源'}
+                  </span>
+                  {disabledSourceKeys.length > 0 && (
+                    <span className='rounded-full bg-white/20 px-1.5 py-0.5 text-[10px] font-semibold'>
+                      {disabledSourceKeys.length}
+                    </span>
+                  )}
+                </button>
+                <button
+                  onClick={() =>
+                    handleQuickBatch(
+                      'batch_disable',
+                      invalidSourceKeys,
+                      '禁用无效源',
+                      '当前没有检测为无效的视频源，请先执行「有效性检测」'
+                    )
+                  }
+                  disabled={
+                    isValidating || isLoading('batchSource_batch_disable')
+                  }
+                  className={`${
+                    isValidating || isLoading('batchSource_batch_disable')
+                      ? buttonStyles.disabled
+                      : buttonStyles.danger
+                  } flex shrink-0 items-center gap-1.5 whitespace-nowrap`}
+                  title='禁用有效性检测中连接失败（无效）的视频源'
+                >
+                  <span>禁用无效源</span>
+                  {invalidSourceKeys.length > 0 && (
+                    <span className='rounded-full bg-white/20 px-1.5 py-0.5 text-[10px] font-semibold'>
+                      {invalidSourceKeys.length}
+                    </span>
+                  )}
+                </button>
+                <button
+                  onClick={() =>
+                    handleQuickBatch(
+                      'batch_disable',
+                      noResultSourceKeys,
+                      '禁用无法搜索源',
+                      '当前没有检测为无法搜索的视频源，请先执行「有效性检测」'
+                    )
+                  }
+                  disabled={
+                    isValidating || isLoading('batchSource_batch_disable')
+                  }
+                  className={`${
+                    isValidating || isLoading('batchSource_batch_disable')
+                      ? buttonStyles.disabled
+                      : buttonStyles.warning
+                  } flex shrink-0 items-center gap-1.5 whitespace-nowrap`}
+                  title='禁用有效性检测中能连通但搜不到结果的视频源'
+                >
+                  <span>禁用无法搜索源</span>
+                  {noResultSourceKeys.length > 0 && (
+                    <span className='rounded-full bg-white/20 px-1.5 py-0.5 text-[10px] font-semibold'>
+                      {noResultSourceKeys.length}
+                    </span>
                   )}
                 </button>
                 <button
@@ -7817,7 +8127,7 @@ const VideoSourceConfig = ({
                     特殊源设置
                   </h3>
                   <p className='mt-1 text-sm text-gray-600 dark:text-gray-400'>
-                    选中的视频源默认对普通搜索隐藏，仅在当前设备访问 /special 开启后参与普通 Web 搜索。
+                    选中的视频源对普通搜索完全隐藏，只在 /under 入口可用；/under 也不会出现普通源。开关状态见 /sp。
                   </p>
                 </div>
                 <button
@@ -7938,8 +8248,8 @@ const VideoSourceConfig = ({
                   <h3 className='text-xl font-semibold text-gray-900 dark:text-gray-100'>
                     客户端去广告配置
                   </h3>
-                  <p className='mt-1 text-sm text-gray-600 dark:text-gray-400'>
-                    勾选后，用户使用 MoonTVPlus APP 或 OrionTV 观看这些视频源时，会自动过滤片头/插播广告。
+                  <p className='mt-1 text-sm text-amber-500 dark:text-amber-400'>
+                    ⚠️客户端已具备本地去广告功能，该功能可能在未来移除
                   </p>
                 </div>
                 <button
@@ -9710,6 +10020,8 @@ const ThemeConfigComponent = ({
     progressThumbType: 'default' as 'default' | 'preset' | 'custom',
     progressThumbPresetId: '',
     progressThumbCustomUrl: '',
+    loadingStyle: 'talisman' as 'classic' | 'grid' | 'talisman',
+    rateBadgeStyle: 'flag' as 'default' | 'flag' | 'medal',
   });
   const [loginBackgroundImages, setLoginBackgroundImages] = useState<string[]>([
     '',
@@ -9732,6 +10044,8 @@ const ThemeConfigComponent = ({
         progressThumbType: config.ThemeConfig.progressThumbType || 'default',
         progressThumbPresetId: config.ThemeConfig.progressThumbPresetId || '',
         progressThumbCustomUrl: config.ThemeConfig.progressThumbCustomUrl || '',
+        loadingStyle: config.ThemeConfig.loadingStyle || 'talisman',
+        rateBadgeStyle: config.ThemeConfig.rateBadgeStyle || 'flag',
       });
 
       // 解析背景图配置
@@ -10482,6 +10796,248 @@ const ThemeConfigComponent = ({
         )}
       </div>
 
+      {/* 初始化加载样式配置 */}
+      <div className='bg-white dark:bg-gray-800 rounded-lg p-6 border border-gray-200 dark:border-gray-700'>
+        <h3 className='text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center gap-2'>
+          <Video className='w-5 h-5' />
+          初始化加载样式
+        </h3>
+        <p className='text-sm text-gray-600 dark:text-gray-400 mb-4'>
+          播放页、直播页首屏加载动画的款式。颜色跟随站点主题色，保存后刷新页面生效
+        </p>
+
+        <div className='grid grid-cols-1 sm:grid-cols-3 gap-3'>
+          {(
+            [
+              {
+                id: 'talisman',
+                name: '魔法阵',
+                desc: '默认',
+                preview: (
+                  <svg
+                    viewBox='0 0 100 100'
+                    className='w-12 h-12 text-green-500'
+                    fill='none'
+                    stroke='currentColor'
+                  >
+                    <circle cx='50' cy='50' r='46' strokeWidth='2' />
+                    <circle
+                      cx='50'
+                      cy='50'
+                      r='34'
+                      strokeWidth='1.5'
+                      strokeDasharray='4 4'
+                    />
+                    <polygon points='50,10 85,70 15,70' strokeWidth='2' />
+                    <polygon points='50,90 15,30 85,30' strokeWidth='2' />
+                    <circle cx='50' cy='50' r='6' fill='currentColor' />
+                  </svg>
+                ),
+              },
+              {
+                id: 'grid',
+                name: '方格',
+                desc: '',
+                preview: (
+                  <div className='grid grid-cols-2 gap-1 w-12 h-12'>
+                    {Array.from({ length: 4 }).map((_, i) => (
+                      <div
+                        key={i}
+                        className={`rounded-sm ${
+                          i < 2
+                            ? 'bg-green-500'
+                            : 'bg-gray-300 dark:bg-gray-600'
+                        }`}
+                      />
+                    ))}
+                  </div>
+                ),
+              },
+              {
+                id: 'classic',
+                name: '旧版',
+                desc: '',
+                preview: <span className='text-4xl leading-none'>📺</span>,
+              },
+            ] as const
+          ).map((opt) => (
+            <button
+              key={opt.id}
+              type='button'
+              onClick={() =>
+                setThemeSettings((prev) => ({ ...prev, loadingStyle: opt.id }))
+              }
+              className={`relative p-4 border-2 rounded-lg transition-all ${
+                themeSettings.loadingStyle === opt.id
+                  ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
+                  : 'border-gray-300 dark:border-gray-600 hover:border-gray-400 dark:hover:border-gray-500'
+              }`}
+            >
+              <div className='flex flex-col items-center gap-2'>
+                <div className='w-12 h-12 flex items-center justify-center'>
+                  {opt.preview}
+                </div>
+                <span className='text-sm font-medium text-gray-700 dark:text-gray-300 text-center'>
+                  {opt.name}
+                  {opt.desc ? `（${opt.desc}）` : ''}
+                </span>
+              </div>
+              {themeSettings.loadingStyle === opt.id && (
+                <div className='absolute top-2 right-2'>
+                  <Check className='w-5 h-5 text-blue-600 dark:text-blue-400' />
+                </div>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* 评分星标样式配置 */}
+      <div className='bg-white dark:bg-gray-800 rounded-lg p-6 border border-gray-200 dark:border-gray-700'>
+        <h3 className='text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center gap-2'>
+          <Video className='w-5 h-5' />
+          评分星标样式
+        </h3>
+        <p className='text-sm text-gray-600 dark:text-gray-400 mb-4'>
+          视频卡片右上角评分徽章的款式
+        </p>
+
+        <div className='grid grid-cols-1 sm:grid-cols-3 gap-3'>
+          {(
+            [
+              {
+                id: 'default',
+                name: '圆点',
+                desc: '',
+                preview: (
+                  <div className='w-9 h-9 rounded-full bg-pink-500 text-white text-xs font-bold flex items-center justify-center shadow-md'>
+                    8.5
+                  </div>
+                ),
+              },
+              {
+                id: 'flag',
+                name: '锦旗',
+                desc: '默认',
+                preview: (
+                  <div
+                    className='w-8 flex flex-col items-center pt-1 pb-2 text-[#4a2600] font-extrabold text-sm'
+                    style={{
+                      background:
+                        'linear-gradient(180deg,#ffd54a,#ff8a3d)',
+                      clipPath:
+                        'polygon(0 0,100% 0,100% 100%,50% 84%,0 100%)',
+                    }}
+                  >
+                    <span className='flex gap-[1px] mb-[1px]'>
+                      {Array.from({ length: 3 }).map((_, i) => (
+                        <svg
+                          key={i}
+                          viewBox='0 0 24 24'
+                          className='w-2 h-2'
+                          fill='#4a2600'
+                        >
+                          <path d='M12 2l2.9 6.3 6.9.7-5.1 4.6 1.4 6.8L12 17.8 5.9 20.4l1.4-6.8L2.2 9l6.9-.7z' />
+                        </svg>
+                      ))}
+                    </span>
+                    8.5
+                  </div>
+                ),
+              },
+              {
+                id: 'medal',
+                name: '勋章',
+                desc: '',
+                preview: (
+                  <div className='flex flex-col items-center'>
+                    <div className='relative w-6 h-4 -mb-2'>
+                      <i
+                        className='absolute left-0 top-0 w-2.5 h-4 -rotate-6 bg-[#ff8a3d] block'
+                        style={{
+                          clipPath:
+                            'polygon(0 0,100% 0,100% 100%,50% 72%,0 100%)',
+                        }}
+                      />
+                      <i
+                        className='absolute right-0 top-0 w-2.5 h-4 rotate-6 bg-[#ff8a3d] block'
+                        style={{
+                          clipPath:
+                            'polygon(0 0,100% 0,100% 100%,50% 72%,0 100%)',
+                        }}
+                      />
+                    </div>
+                    <div
+                      className='relative z-10 w-8 h-8 rounded-full flex flex-col items-center justify-center text-[#4a2600] font-extrabold text-[11px] leading-none border-2 border-white/70'
+                      style={{
+                        background:
+                          'linear-gradient(135deg,#ffd54a,#ff8a3d)',
+                      }}
+                    >
+                      <span className='flex flex-col items-center -mb-[1px]'>
+                        <span className='flex'>
+                          <svg
+                            viewBox='0 0 24 24'
+                            className='w-1.5 h-1.5'
+                            fill='#4a2600'
+                          >
+                            <path d='M12 2l2.9 6.3 6.9.7-5.1 4.6 1.4 6.8L12 17.8 5.9 20.4l1.4-6.8L2.2 9l6.9-.7z' />
+                          </svg>
+                        </span>
+                        <span className='flex gap-[1px]'>
+                          {Array.from({ length: 2 }).map((_, i) => (
+                            <svg
+                              key={i}
+                              viewBox='0 0 24 24'
+                              className='w-1.5 h-1.5'
+                              fill='#4a2600'
+                            >
+                              <path d='M12 2l2.9 6.3 6.9.7-5.1 4.6 1.4 6.8L12 17.8 5.9 20.4l1.4-6.8L2.2 9l6.9-.7z' />
+                            </svg>
+                          ))}
+                        </span>
+                      </span>
+                      8.5
+                    </div>
+                  </div>
+                ),
+              },
+            ] as const
+          ).map((opt) => (
+            <button
+              key={opt.id}
+              type='button'
+              onClick={() =>
+                setThemeSettings((prev) => ({
+                  ...prev,
+                  rateBadgeStyle: opt.id,
+                }))
+              }
+              className={`relative p-4 border-2 rounded-lg transition-all ${
+                themeSettings.rateBadgeStyle === opt.id
+                  ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
+                  : 'border-gray-300 dark:border-gray-600 hover:border-gray-400 dark:hover:border-gray-500'
+              }`}
+            >
+              <div className='flex flex-col items-center gap-2'>
+                <div className='w-12 h-12 flex items-center justify-center'>
+                  {opt.preview}
+                </div>
+                <span className='text-sm font-medium text-gray-700 dark:text-gray-300 text-center'>
+                  {opt.name}
+                  {opt.desc ? `（${opt.desc}）` : ''}
+                </span>
+              </div>
+              {themeSettings.rateBadgeStyle === opt.id && (
+                <div className='absolute top-2 right-2'>
+                  <Check className='w-5 h-5 text-blue-600 dark:text-blue-400' />
+                </div>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* 保存按钮 */}
       <div className='flex justify-end'>
         <button
@@ -10555,6 +11111,7 @@ const SiteConfigComponent = ({
     LiveChartProxy: '',
     BannerDataSource: 'Douban',
     RecommendationDataSource: 'Mixed',
+    LocalSettingsSyncMode: 'off',
     PansouApiUrl: '',
     PansouUsername: '',
     PansouPassword: '',
@@ -10612,7 +11169,6 @@ const SiteConfigComponent = ({
       label: '豆瓣 CDN By CMLiussss（腾讯云）',
     },
     { value: 'cmliussss-cdn-ali', label: '豆瓣 CDN By CMLiussss（阿里云）' },
-    { value: 'baidu', label: '百度图片代理' },
     { value: 'custom', label: '自定义代理' },
     {
       value: 'direct',
@@ -10684,6 +11240,7 @@ const SiteConfigComponent = ({
         BannerDataSource: config.SiteConfig.BannerDataSource || 'Douban',
         RecommendationDataSource:
           config.SiteConfig.RecommendationDataSource || 'Mixed',
+        LocalSettingsSyncMode: config.SiteConfig.LocalSettingsSyncMode || 'off',
         PansouApiUrl: config.SiteConfig.PansouApiUrl || '',
         PansouUsername: config.SiteConfig.PansouUsername || '',
         PansouPassword: config.SiteConfig.PansouPassword || '',
@@ -11226,6 +11783,37 @@ const SiteConfigComponent = ({
         </div>
         <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
           启用后搜索结果将实时流式返回,提升用户体验。
+        </p>
+      </div>
+
+      {/* 本地设置云同步模式 */}
+      <div>
+        <label className='block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2'>
+          本地设置云同步
+        </label>
+        <select
+          value={siteSettings.LocalSettingsSyncMode || 'off'}
+          onChange={(e) =>
+            setSiteSettings((prev) => ({
+              ...prev,
+              LocalSettingsSyncMode: e.target.value as
+                | 'off'
+                | 'manual'
+                | 'auto',
+            }))
+          }
+          className='w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-green-500 focus:border-transparent'
+        >
+          <option value='off'>关闭</option>
+          <option value='manual'>手动模式</option>
+          <option value='auto'>自动模式</option>
+        </select>
+        <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
+          登录用户可把本地设置同步到云端，多设备保持一致。
+          <br />
+          手动模式：本地设置面板右上角出现「备份/恢复」按钮。
+          <br />
+          自动模式：进入网站自动拉取云端副本，打开本地设置面板时后台静默同步。
         </p>
       </div>
 
@@ -15768,10 +16356,12 @@ const AIConfigComponent = ({
   const [enableVideoCardEntry, setEnableVideoCardEntry] = useState(true);
   const [enablePlayPageEntry, setEnablePlayPageEntry] = useState(true);
   const [enableAIComments, setEnableAIComments] = useState(false);
+  const [enableAICommentsToolMode, setEnableAICommentsToolMode] =
+    useState(false);
 
-  // 高级设置
-  const [temperature, setTemperature] = useState(0.7);
-  const [maxTokens, setMaxTokens] = useState(1000);
+  // 高级设置（Temperature / MaxTokens 未设置时留空，实际调用由代码兜底默认值）
+  const [temperature, setTemperature] = useState<number | ''>('');
+  const [maxTokens, setMaxTokens] = useState<number | ''>('');
   const [systemPrompt, setSystemPrompt] = useState('');
   const [enableStreaming, setEnableStreaming] = useState(true);
 
@@ -15806,8 +16396,11 @@ const AIConfigComponent = ({
       setEnableVideoCardEntry(config.AIConfig.EnableVideoCardEntry !== false);
       setEnablePlayPageEntry(config.AIConfig.EnablePlayPageEntry !== false);
       setEnableAIComments(config.AIConfig.EnableAIComments || false);
-      setTemperature(config.AIConfig.Temperature ?? 0.7);
-      setMaxTokens(config.AIConfig.MaxTokens ?? 1000);
+      setEnableAICommentsToolMode(
+        config.AIConfig.EnableAICommentsToolMode || false
+      );
+      setTemperature(config.AIConfig.Temperature ?? '');
+      setMaxTokens(config.AIConfig.MaxTokens ?? '');
       setSystemPrompt(config.AIConfig.SystemPrompt || '');
       setEnableStreaming(config.AIConfig.EnableStreaming !== false);
       setDefaultMessageNoVideo(config.AIConfig.DefaultMessageNoVideo || '');
@@ -15849,8 +16442,9 @@ const AIConfigComponent = ({
             EnableVideoCardEntry: enableVideoCardEntry,
             EnablePlayPageEntry: enablePlayPageEntry,
             EnableAIComments: enableAIComments,
-            Temperature: temperature,
-            MaxTokens: maxTokens,
+            EnableAICommentsToolMode: enableAICommentsToolMode,
+            Temperature: temperature === '' ? undefined : temperature,
+            MaxTokens: maxTokens === '' ? undefined : maxTokens,
             SystemPrompt: systemPrompt,
             EnableStreaming: enableStreaming,
             DefaultMessageNoVideo: defaultMessageNoVideo,
@@ -16380,6 +16974,13 @@ const AIConfigComponent = ({
             state: enableAIComments,
             setState: setEnableAIComments,
           },
+          {
+            key: 'aicommentstoolmode',
+            label: 'AI评论工具式调用',
+            desc: '开启后评论生成走工具式调用，模型自主联网/查豆瓣/TMDB 获取真实评价（需模型支持 function calling；关闭则单轮直调，联网仅预抓取参考）',
+            state: enableAICommentsToolMode,
+            setState: setEnableAICommentsToolMode,
+          },
         ].map((item) => (
           <div
             key={item.key}
@@ -16414,19 +17015,23 @@ const AIConfigComponent = ({
         <div className='mt-4 space-y-4'>
           <div>
             <label className='block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2'>
-              Temperature ({temperature})
+              Temperature ({temperature === '' ? '未设置' : temperature})
             </label>
             <input
               type='range'
-              min='0'
+              min='-0.1'
               max='2'
               step='0.1'
-              value={temperature}
-              onChange={(e) => setTemperature(parseFloat(e.target.value))}
+              value={temperature === '' ? -0.1 : temperature}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value);
+                // 滑到最左（-0.1）视为「不设置」，保留 0 为可选真实值
+                setTemperature(v < 0 ? '' : v);
+              }}
               className='w-full'
             />
             <p className='text-xs text-gray-500 dark:text-gray-400 mt-1'>
-              控制回复的创造性，0=保守，2=创造
+              控制回复的创造性，0=保守，2=创造；滑到最左则不设置
             </p>
           </div>
 
@@ -16436,10 +17041,19 @@ const AIConfigComponent = ({
             </label>
             <input
               type='number'
+              min='1'
               value={maxTokens}
-              onChange={(e) => setMaxTokens(parseInt(e.target.value) || 1000)}
+              placeholder='留空则不设置'
+              onChange={(e) => {
+                const v = e.target.value;
+                const n = parseInt(v, 10);
+                setMaxTokens(v === '' || Number.isNaN(n) ? '' : n);
+              }}
               className='w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100'
             />
+            <p className='text-xs text-gray-500 dark:text-gray-400 mt-1'>
+              留空则不设置
+            </p>
           </div>
 
           <div>
@@ -18142,6 +18756,18 @@ function AdminPageClient() {
     telegramConfig: false,
   });
 
+  // PC 左右布局：当前选中的区块（单选），持久化以便保存刷新后仍停留在原区块
+  const [activeKey, setActiveKey] = useState<string>(() => {
+    if (typeof window === 'undefined') return 'siteConfig';
+    return localStorage.getItem('admin_active_section') || 'siteConfig';
+  });
+  // PC 内容区滚动容器，切换区块时回到顶部
+  const contentScrollRef = useRef<HTMLDivElement | null>(null);
+  // PC 侧边栏中分组的展开状态
+  const [expandedGroups, setExpandedGroups] = useState<{
+    [key: string]: boolean;
+  }>({ mediaLibrary: true });
+
   // 获取管理员配置
   // showLoading 用于控制是否在请求期间显示整体加载骨架。
   const fetchConfig = useCallback(async (showLoading = false) => {
@@ -18232,8 +18858,18 @@ function AdminPageClient() {
   useEffect(() => {
     // 首次加载时显示骨架
     fetchConfig(true);
-    // 不再自动获取用户列表，等用户打开用户管理选项卡时再获取
+    // 若恢复的区块是用户管理，则补拉一次用户列表
+    if (activeKey === 'userConfig') {
+      fetchUsersV2();
+    }
+    // 仅在挂载时执行
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchConfig]);
+
+  // PC 切换区块时，内容区滚动回顶部
+  useEffect(() => {
+    contentScrollRef.current?.scrollTo({ top: 0 });
+  }, [activeKey]);
 
   // 切换标签展开状态
   const toggleTab = (tabKey: string) => {
@@ -18248,6 +18884,23 @@ function AdminPageClient() {
     if (tabKey === 'userConfig' && !wasExpanded && !usersV2) {
       fetchUsersV2();
     }
+  };
+
+  // PC 左右布局：选中某个区块
+  const selectSection = (key: string) => {
+    setActiveKey(key);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('admin_active_section', key);
+    }
+    // 首次进入用户管理时懒加载用户列表
+    if (key === 'userConfig' && !usersV2) {
+      fetchUsersV2();
+    }
+  };
+
+  // PC 侧边栏：切换分组展开
+  const toggleGroup = (key: string) => {
+    setExpandedGroups((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
   // 新增: 重置配置处理函数
@@ -18348,6 +19001,295 @@ function AdminPageClient() {
     );
   }
 
+  // 管理面板区块导航配置（PC 侧边栏与移动端手风琴共用同一份数据）
+  type AdminNavItem = {
+    key: string;
+    title: string;
+    icon: React.ReactNode;
+    ownerOnly?: boolean;
+    render?: () => React.ReactNode;
+    children?: AdminNavItem[];
+  };
+
+  const navIconClass = 'text-gray-600 dark:text-gray-400';
+  const navItems: AdminNavItem[] = [
+    {
+      key: 'configFile',
+      title: '配置文件',
+      ownerOnly: true,
+      icon: <FileText size={20} className={navIconClass} />,
+      render: () => (
+        <ConfigFileComponent config={config} refreshConfig={fetchConfig} />
+      ),
+    },
+    {
+      key: 'siteConfig',
+      title: '站点配置',
+      icon: <Settings size={20} className={navIconClass} />,
+      render: () => (
+        <SiteConfigComponent config={config} refreshConfig={fetchConfig} />
+      ),
+    },
+    {
+      key: 'registrationConfig',
+      title: '注册配置',
+      icon: <UserPlus size={20} className={navIconClass} />,
+      render: () => (
+        <RegistrationConfigComponent
+          config={config}
+          refreshConfig={fetchConfig}
+        />
+      ),
+    },
+    {
+      key: 'themeConfig',
+      title: '个性化配置',
+      icon: <Palette size={20} className={navIconClass} />,
+      render: () => (
+        <ThemeConfigComponent config={config} refreshConfig={fetchConfig} />
+      ),
+    },
+    {
+      key: 'userConfig',
+      title: '用户管理',
+      icon: <Users size={20} className={navIconClass} />,
+      render: () => (
+        <UserConfig
+          config={config}
+          role={role}
+          refreshConfig={refreshConfigAndUsers}
+          usersV2={usersV2}
+          userPage={userPage}
+          userTotalPages={userTotalPages}
+          userTotal={userTotal}
+          fetchUsersV2={fetchUsersV2}
+          userListLoading={userListLoading}
+          userSearch={userSearch}
+          setUserSearch={setUserSearch}
+        />
+      ),
+    },
+    {
+      key: 'videoSource',
+      title: '视频源配置',
+      icon: <Video size={20} className={navIconClass} />,
+      render: () => (
+        <VideoSourceConfig config={config} refreshConfig={fetchConfig} />
+      ),
+    },
+    {
+      key: 'sourceScriptLab',
+      title: '视频源脚本',
+      icon: <Bot size={20} className={navIconClass} />,
+      render: () => <VideoSourceScriptLab />,
+    },
+    {
+      key: 'musicConfig',
+      title: '音乐配置',
+      icon: (
+        <svg
+          width='20'
+          height='20'
+          viewBox='0 0 24 24'
+          fill='none'
+          stroke='currentColor'
+          strokeWidth='2'
+          strokeLinecap='round'
+          strokeLinejoin='round'
+          className={navIconClass}
+        >
+          <path d='M9 18V5l12-2v13' />
+          <circle cx='6' cy='18' r='3' />
+          <circle cx='18' cy='16' r='3' />
+        </svg>
+      ),
+      render: () => (
+        <MusicConfigComponent config={config} refreshConfig={fetchConfig} />
+      ),
+    },
+    {
+      key: 'suwayomiConfig',
+      title: '漫画配置',
+      icon: <BookOpen size={20} className={navIconClass} />,
+      render: () => (
+        <SuwayomiConfigComponent config={config} refreshConfig={fetchConfig} />
+      ),
+    },
+    {
+      key: 'opdsConfig',
+      title: '电子书配置',
+      icon: <BookMarked size={20} className={navIconClass} />,
+      render: () => (
+        <OPDSConfigComponent config={config} refreshConfig={fetchConfig} />
+      ),
+    },
+    {
+      key: 'liveSource',
+      title: '电视直播源配置',
+      icon: <Tv size={20} className={navIconClass} />,
+      render: () => (
+        <LiveSourceConfig config={config} refreshConfig={fetchConfig} />
+      ),
+    },
+    {
+      key: 'webLive',
+      title: '网络直播配置',
+      icon: <Globe size={20} className={navIconClass} />,
+      render: () => (
+        <WebLiveConfig config={config} refreshConfig={fetchConfig} />
+      ),
+    },
+    {
+      key: 'mediaLibrary',
+      title: '私人影库',
+      icon: (
+        <Database size={20} className='text-yellow-700 dark:text-yellow-400' />
+      ),
+      children: [
+        {
+          key: 'openListConfig',
+          title: 'Openlist配置',
+          icon: <FolderOpen size={20} className={navIconClass} />,
+          render: () => (
+            <OpenListConfigComponent
+              config={config}
+              refreshConfig={fetchConfig}
+            />
+          ),
+        },
+        {
+          key: 'embyConfig',
+          title: 'Emby 媒体库',
+          icon: <FolderOpen size={20} className={navIconClass} />,
+          render: () => (
+            <EmbyConfigComponent config={config} refreshConfig={fetchConfig} />
+          ),
+        },
+        {
+          key: 'xiaoyaConfig',
+          title: '小雅配置',
+          icon: <FolderOpen size={20} className={navIconClass} />,
+          render: () => (
+            <XiaoyaConfigComponent
+              config={config}
+              refreshConfig={fetchConfig}
+            />
+          ),
+        },
+        {
+          key: 'movieRequests',
+          title: '求片管理',
+          icon: <Video size={20} className={navIconClass} />,
+          render: () => (
+            <MovieRequestsComponent
+              config={config}
+              refreshConfig={fetchConfig}
+            />
+          ),
+        },
+        {
+          key: 'animeSubscription',
+          title: '追番订阅',
+          icon: <Cat size={20} className={navIconClass} />,
+          render: () => (
+            <AnimeSubscriptionComponent
+              config={config}
+              refreshConfig={fetchConfig}
+            />
+          ),
+        },
+        {
+          key: 'netDiskConfig',
+          title: '网盘配置',
+          icon: <Cloud size={20} className={navIconClass} />,
+          render: () => (
+            <NetDiskConfigComponent
+              config={config}
+              refreshConfig={fetchConfig}
+            />
+          ),
+        },
+      ],
+    },
+    {
+      key: 'aiConfig',
+      title: 'AI设定',
+      icon: <Bot size={20} className={navIconClass} />,
+      render: () => (
+        <AIConfigComponent config={config} refreshConfig={fetchConfig} />
+      ),
+    },
+    {
+      key: 'emailConfig',
+      title: '邮件配置',
+      icon: <Mail size={20} className={navIconClass} />,
+      render: () => (
+        <EmailConfigComponent config={config} refreshConfig={fetchConfig} />
+      ),
+    },
+    {
+      key: 'telegramConfig',
+      title: 'Telegram Bot',
+      icon: <Send size={20} className={navIconClass} />,
+      render: () => (
+        <TelegramConfigComponent config={config} refreshConfig={fetchConfig} />
+      ),
+    },
+    {
+      key: 'categoryConfig',
+      title: '分类配置',
+      icon: <FolderOpen size={20} className={navIconClass} />,
+      render: () => (
+        <CategoryConfig config={config} refreshConfig={fetchConfig} />
+      ),
+    },
+    {
+      key: 'customAdFilter',
+      title: '自定义去广告',
+      icon: (
+        <svg
+          width='20'
+          height='20'
+          viewBox='0 0 24 24'
+          fill='none'
+          stroke='currentColor'
+          strokeWidth='2'
+          strokeLinecap='round'
+          strokeLinejoin='round'
+          className={navIconClass}
+        >
+          <path d='M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8z' />
+          <path d='M8 12h8' />
+        </svg>
+      ),
+      render: () => (
+        <CustomAdFilterConfig config={config} refreshConfig={fetchConfig} />
+      ),
+    },
+    {
+      key: 'dataMigration',
+      title: '数据迁移',
+      ownerOnly: true,
+      icon: <Database size={20} className={navIconClass} />,
+      render: () => <DataMigration onRefreshConfig={refreshConfigAndUsers} />,
+    },
+  ];
+
+  // 根据 key 查找区块（含分组子项）
+  const findNavItem = (key: string): AdminNavItem | undefined => {
+    for (const it of navItems) {
+      if (it.key === key) return it;
+      const child = it.children?.find((c) => c.key === key);
+      if (child) return child;
+    }
+    return undefined;
+  };
+
+  const visibleNavItems = navItems.filter(
+    (it) => !it.ownerOnly || role === 'owner'
+  );
+  const activeItem = findNavItem(activeKey);
+
   return (
     <PageLayout activePath='/admin'>
       <div className='px-2 sm:px-10 py-4 sm:py-8'>
@@ -18427,6 +19369,76 @@ function AdminPageClient() {
             </div>
           )}
 
+          {/* PC：左右结构（侧边栏 + 内容区），两栏各自独立滚动 */}
+          <div className='hidden lg:flex gap-6 lg:h-[calc(100vh-7rem)]'>
+            {/* 侧边栏 */}
+            <nav className='w-56 shrink-0 h-full overflow-y-auto pr-1'>
+              <div className='space-y-1'>
+                {visibleNavItems.map((item) =>
+                  item.children ? (
+                    <div key={item.key}>
+                      <button
+                        onClick={() => toggleGroup(item.key)}
+                        className='w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors'
+                      >
+                        <span className='flex items-center gap-2 min-w-0'>
+                          {item.icon}
+                          <span className='truncate'>{item.title}</span>
+                        </span>
+                        {expandedGroups[item.key] ? (
+                          <ChevronUp size={16} />
+                        ) : (
+                          <ChevronDown size={16} />
+                        )}
+                      </button>
+                      {expandedGroups[item.key] && (
+                        <div className='mt-1 ml-3 pl-3 border-l border-gray-200 dark:border-gray-700 space-y-1'>
+                          {item.children.map((child) => (
+                            <button
+                              key={child.key}
+                              onClick={() => selectSection(child.key)}
+                              className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
+                                activeKey === child.key
+                                  ? 'bg-green-500/10 text-green-600 dark:text-green-400 font-medium'
+                                  : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'
+                              }`}
+                            >
+                              {child.icon}
+                              <span className='truncate'>{child.title}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <button
+                      key={item.key}
+                      onClick={() => selectSection(item.key)}
+                      className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
+                        activeKey === item.key
+                          ? 'bg-green-500/10 text-green-600 dark:text-green-400 font-medium'
+                          : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800'
+                      }`}
+                    >
+                      {item.icon}
+                      <span className='truncate'>{item.title}</span>
+                    </button>
+                  )
+                )}
+              </div>
+            </nav>
+
+            {/* 内容区（独立滚动） */}
+            <div
+              ref={contentScrollRef}
+              className='flex-1 min-w-0 h-full overflow-y-auto pr-1'
+            >
+              {activeItem?.render?.()}
+            </div>
+          </div>
+
+          {/* 移动端 / 窄屏：保留原有手风琴 */}
+          <div className='lg:hidden'>
           {/* 配置文件标签 - 仅站长可见 */}
           {role === 'owner' && (
             <CollapsibleTab
@@ -18849,6 +19861,7 @@ function AdminPageClient() {
                 <DataMigration onRefreshConfig={refreshConfigAndUsers} />
               </CollapsibleTab>
             )}
+          </div>
           </div>
         </div>
       </div>
