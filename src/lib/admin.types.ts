@@ -1,8 +1,19 @@
+/** 备用 OpenList 源（可添加无限条，路径用「源名@路径」指定） */
+export interface OpenListExtraSource {
+  name: string; // 源名字，唯一、非空、不含 @
+  url: string; // OpenList 服务器地址
+  username: string;
+  password: string;
+}
+
 export interface AdminConfig {
   ConfigSubscribtion: {
     URL: string;
     AutoUpdate: boolean;
     LastCheck: string;
+    // 拉取配置代理：拉取配置订阅时使用的 HTTP 代理，留空则回退到环境变量
+    // CONFIG_SUBSCRIPTION_PROXY
+    Proxy?: string;
   };
   ConfigFile: string;
   SiteConfig: {
@@ -40,7 +51,9 @@ export interface AdminConfig {
     BangumiProxy?: string;
     LiveChartProxy?: string;
     BannerDataSource?: string; // 轮播图数据源：TMDB、TX 或 Douban
-    RecommendationDataSource?: string; // 更多推荐数据源：Douban、TMDB、Mixed、MixedSmart
+    RecommendationDataSource?: string; // 更多推荐数据源：Douban、TMDB、Mixed
+    // 本地设置云同步模式：off=关闭，manual=手动（面板右上角备份/恢复按钮），auto=自动（进入网站静默拉取、面板打开静默同步）
+    LocalSettingsSyncMode?: 'off' | 'manual' | 'auto';
     // Pansou配置
     PansouApiUrl?: string;
     PansouUsername?: string;
@@ -155,19 +168,20 @@ export interface AdminConfig {
     progressThumbType?: 'default' | 'preset' | 'custom'; // 图标类型
     progressThumbPresetId?: string; // 预制图标ID
     progressThumbCustomUrl?: string; // 自定义图标URL
+    // 初始化加载样式：播放页/直播页首屏加载动画的款式
+    loadingStyle?: 'classic' | 'grid' | 'talisman';
+    // 评分星标样式：视频卡片右上角评分徽章的款式
+    rateBadgeStyle?: 'default' | 'flag' | 'medal';
   };
   OpenListConfig?: {
     Enabled: boolean; // 是否启用私人影库功能
-    URL: string; // OpenList 服务器地址
+    URL: string; // 主 OpenList 服务器地址
     Username: string; // 账号（用于登录获取Token）
     Password: string; // 密码（用于登录获取Token）
     RootPath?: string; // 旧字段：根目录路径（向后兼容，迁移后删除）
-    RootPaths?: string[]; // 新字段：多根目录路径列表
-    OfflineDownloadPath: string; // 离线下载目录，默认 "/"
-    OfflineDownloadUseCustomSource?: boolean; // 离线下载是否使用独立 OpenList 源
-    OfflineDownloadURL?: string; // 独立离线下载 OpenList 服务器地址
-    OfflineDownloadUsername?: string; // 独立离线下载 OpenList 账号
-    OfflineDownloadPassword?: string; // 独立离线下载 OpenList 密码
+    RootPaths?: string[]; // 根目录路径列表，支持「源名@路径」
+    ExtraSources?: OpenListExtraSource[]; // 备用 OpenList 源列表
+    OfflineDownloadPath: string; // 离线下载目录，支持「源名@路径」，默认 "/"
     LastRefreshTime?: number; // 上次刷新时间戳
     ResourceCount?: number; // 资源数量
     ScanInterval?: number; // 定时扫描间隔（分钟），0表示关闭，最低60分钟
@@ -175,12 +189,15 @@ export interface AdminConfig {
     DisableVideoPreview?: boolean; // 禁用预览视频，直接返回直连链接
     /**
      * 路径元信息（最长前缀匹配 folder 路径）
-     * key: 规范化路径前缀，如 /videos 可匹配 /videos/某影片
+     * key: 规范化路径前缀，如 /videos 可匹配 /videos/某影片；
+     *      也可写「源名@/videos」只对指定源生效（无前缀则对所有源生效）
      */
     PathMeta?: {
       [path: string]: {
         category: string; // 分类名
         refresh14m: boolean; // 该路径播放时是否启用 14 分钟 URL 续期
+        proxyPlay: boolean; // 该路径播放链接是否使用服务器代理播放
+        proxyCacheMinutes: number; // 代理播放时链接最终重定向的缓存时长（分钟），默认 60
       };
     };
   };
@@ -263,6 +280,7 @@ export interface AdminConfig {
     EnableVideoCardEntry: boolean; // VideoCard入口开关
     EnablePlayPageEntry: boolean; // 播放页入口开关
     EnableAIComments: boolean; // AI评论生成开关
+    EnableAICommentsToolMode?: boolean; // AI评论走工具式调用（模型自主联网/查豆瓣/TMDB），默认关闭
     // 高级设置
     Temperature?: number; // AI温度参数（0-2），默认0.7
     MaxTokens?: number; // 最大回复token数，默认1000
@@ -415,6 +433,10 @@ export interface AdminConfig {
       onePerEpisode?: boolean;
       /** 缺集重新检索（默认 false） */
       refillMissingEpisodes?: boolean;
+      /** 自定义集数提取正则（留空用内置规则，首个捕获组作为集数） */
+      episodeRegex?: string;
+      /** 覆盖父目录：留空用「离线下载目录」，填写后为「该路径/番剧名」，可用「源名@」指定备用源 */
+      downloadPath?: string;
       lastCheckTime: number;
       lastEpisode: number;
       createdAt: number;

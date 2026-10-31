@@ -4,8 +4,6 @@
   <img src="public/logo.png" alt="MoonTVPlus Logo" width="120">
 </div>
 
-## ⚠️ 请某些人停止你的抄袭行为，不要我上什么功能你就抄什么，借鉴≠抄袭
-
 > 🎬 **MoonTVPlus** 是基于 [MoonTV v100](https://github.com/MoonTechLab/LunaTV) 二次开发的增强版影视聚合播放器。它在原版基础上新增了外部播放器支持、视频超分、弹幕系统、评论抓取等实用功能，提供更强大的观影体验。
 
 <div align="center">
@@ -30,7 +28,13 @@
 - 🧩 **视频源脚本**：支持通过脚本自定义视频源、搜索、详情与播放解析逻辑（实验性）
 - 🪒**自定义去广告**：你可以自定义你的去广告代码，实现更强力的去广告功能
 - 🚀 **更快更顺滑**：相较原版项目整体速度更快，交互体验更好
-- 🎭 **观影室**：支持多人同步观影、实时聊天、语音通话等功能（实验性）。
+- 🧲 **磁力搜索**：聚合 Mikan、Nyaa、ACG.RIP、动漫花园等站点搜索资源，可对种子做健康检查，并推送至 OpenList 离线下载。
+- 📺 **WebTV**：专为电视大屏设计的操作界面，电视上扫码即可登录，手机浏览器还能化身虚拟遥控器。
+- 📡 **追番订阅**：订阅番剧自动追更，自动识别字幕组与集数，更新后自动入库或下载，还可收到提醒通知。
+- 🎞️ **外挂字幕**：支持加载本地字幕文件，ASS/SSA 特效字幕、PGS 图像字幕均可正确渲染显示。
+- 🤖 **AI 问片**：全站 AI 影视助手，聊着天就能让它帮你找片、查片信息，也有 AI 生成的影片评论可看。
+- 🔔 **消息通知**：站内通知中心统一查看各类消息，追番更新、求片处理结果等还可通过邮件或浏览器推送提醒。
+- 🎭 **观影室**：支持多人同步观影、进度同步、屏幕共享、实时聊天、语音通话等功能。
 - 📥 **M3U8完整下载**：支持浏览器内合并 m3u8 片段下载，也支持下载到本地文件夹并无感播放本地视频。
 - 💾 **服务器离线下载**：支持在服务器端下载视频文件，支持断点续传，提前下载到家秒加载 。
 - 📚 **私人影库**：接入 OpenList、Emby 或小雅，可打造专属私人影库，亦可观看网盘资源。
@@ -190,9 +194,21 @@ on:
    - 添加 `D1_DATABASE_ID` 并填入你的数据库 ID
    - 无需配置 `UPSTASH_URL` 和 `UPSTASH_TOKEN`
 
-**7. 配置外部定时任务（可选）**
+**7. 自定义 Wrangler 变量（可选）**
 
-可使用外部定时请求/api/cron/mtvpls端点以触发定时任务，或新建一个workers请求触发，推荐每小时请求一次。
+可通过 `VARS`（Repository secret 或 variable）把自定义变量写入 `wrangler.toml` 的 `[vars]`，每行一个 `KEY=VALUE`：
+
+```
+ENABLE_TVBOX_SUBSCRIBE=true
+FOO=bar
+```
+
+部署后会追加到 `[vars]`：
+
+```toml
+ENABLE_TVBOX_SUBSCRIBE = "true"
+FOO = "bar"
+```
 
 ---
 
@@ -406,6 +422,9 @@ volumes:
   kvrocks-data:
 ```
 （若指定kvrocks-data目录，需要将所挂载的数据目录权限调整为777否则会导致创建数据库失败）
+
+> **指定运行 UID/GID**：容器默认以 `1001:1001`（`nextjs` 用户）运行。可通过 `PUID` / `PGID` 环境变量指定容器进程运行时使用的用户/组 ID。挂载宿主机目录时建议将其设为宿主机目录的属主 UID/GID，容器启动时会自动调整进程属主并修正 `/data`、`/app/.data` 等数据目录的属主，避免权限问题。
+
 ## 配置文件
 
 完成部署后为空壳应用，无播放源，需要站长在管理后台的配置文件设置中填写配置文件，本版本已不支持无数据库运行。
@@ -496,6 +515,7 @@ dockge/komodo 等 docker compose UI 也有自动更新功能
 | WATCH_ROOM_SERVER_TYPE                   | 观影室服务器类型                                             | internal/external           | internal                                                     |
 | WATCH_ROOM_EXTERNAL_SERVER_URL           | 外部观影室服务器地址（当 SERVER_TYPE 为 external 时必填）    | WebSocket URL               | (空)                                                         |
 | WATCH_ROOM_EXTERNAL_SERVER_AUTH          | 外部观影室服务器认证令牌（当 SERVER_TYPE 为 external 时必填） | 任意字符串                  | (空)                                                         |
+| WATCH_ROOM_EXTERNAL_APP_ID               | 外部观影室应用隔离 ID（多个应用共用同一外部服务器时隔离房间，建议使用随机长字符串） | 任意字符串 | (空) |
 | NEXT_PUBLIC_VOICE_CHAT_STRATEGY          | 观影室语音聊天策略                                           | webrtc-fallback/server-only | webrtc-fallback                                              |
 | NEXT_PUBLIC_ENABLE_OFFLINE_DOWNLOAD      | 是否启用服务器离线下载功能（开启后也仅管理员和站长可用）     | true/false                  | false                                                        |
 | OFFLINE_DOWNLOAD_DIR                     | 离线下载文件存储目录                                         | 任意有效路径                | /data                                                        |
@@ -507,6 +527,7 @@ dockge/komodo 等 docker compose UI 也有自动更新功能
 | MAGNET_HEALTH_MAX_CONCURRENT             | 动漫磁力测活全站同时进行的最大任务数（进程内）               | 1-100                       | 10                                                           |
 | INIT_CONFIG                              | 初始配置（JSON 格式，包含 api_site、custom_category、lives 等） | JSON 字符串                 | (空)                                                         |
 | CONFIG_SUBSCRIPTION_URL                  | 配置订阅 URL（Base58 编码的配置文件地址，优先级高于 INIT_CONFIG） | URL                         | (空)                                                         |
+| CONFIG_SUBSCRIPTION_PROXY                | 拉取配置代理（拉取配置订阅时使用的 HTTP 代理）               | URL                         | (空)                                                         |
 | TMDB_API_KEY                             | TMDB API 密钥                                                | 任意字符串                  | (空)                                                         |
 | TMDB_PROXY                               | TMDB 代理地址                                                | URL                         | (空)                                                         |
 | TMDB_REVERSE_PROXY                       | TMDB 反向代理地址                                            | URL                         | (空)                                                         |
@@ -583,7 +604,13 @@ NEXT_PUBLIC_VOICE_CHAT_STRATEGY 选项解释：
    WATCH_ROOM_EXTERNAL_SERVER_AUTH=your_secure_token
    ```
 
-3. 重启应用即可使用外部观影室服务器
+3. （可选）如果多个应用共用同一个外部观影室服务器，为每个应用设置不同的隔离 ID（随机长字符串），使各应用的房间相互隔离：
+
+   ```env
+   WATCH_ROOM_EXTERNAL_APP_ID=your_random_app_id
+   ```
+
+4. 重启应用即可使用外部观影室服务器
 
 
 
@@ -630,7 +657,7 @@ NEXT_PUBLIC_VOICE_CHAT_STRATEGY 选项解释：
    TVBOX_BLOCKED_SOURCES=source1,source2
    ```
 
-2. 重启应用后，登录网站，点击用户菜单中的"订阅"按钮
+2. 重启应用后，登录网站，点击用户菜单中的"电视访问"按钮
 
 3. 复制生成的订阅链接到 TVBOX 应用中使用
 

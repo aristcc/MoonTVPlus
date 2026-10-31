@@ -3,8 +3,10 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { validateKeywordExpr } from '@/lib/anime-keyword-expr';
+import { validateEpisodeRegex } from '@/lib/anime-subscription';
 import { getConfig } from '@/lib/config';
 import { db } from '@/lib/db';
+import { findUnknownSourceName } from '@/lib/openlist-sources';
 import { AnimeSubscription } from '@/types/anime-subscription';
 
 export const runtime = 'nodejs';
@@ -62,6 +64,8 @@ export async function POST(req: NextRequest) {
       lastEpisode,
       onePerEpisode,
       refillMissingEpisodes,
+      episodeRegex,
+      downloadPath,
     } = await req.json();
 
     // 验证必填字段
@@ -90,6 +94,17 @@ export async function POST(req: NextRequest) {
         );
       }
     }
+    const episodeRegexText =
+      typeof episodeRegex === 'string' ? episodeRegex.trim() : '';
+    if (episodeRegexText) {
+      const regexCheck = validateEpisodeRegex(episodeRegexText);
+      if (!regexCheck.ok) {
+        return NextResponse.json(
+          { error: `集数正则无效: ${regexCheck.error}` },
+          { status: 400 }
+        );
+      }
+    }
 
     const config = await getConfig();
     if (!config.AnimeSubscriptionConfig) {
@@ -100,6 +115,17 @@ export async function POST(req: NextRequest) {
       };
     } else if (!config.AnimeSubscriptionConfig.DownloadTool) {
       config.AnimeSubscriptionConfig.DownloadTool = 'aria2';
+    }
+
+    // 「覆盖路径」可选；写了「源名@」前缀时源必须已配置
+    const downloadPathText =
+      typeof downloadPath === 'string' ? downloadPath.trim() : '';
+    const unknownSource = findUnknownSourceName(config, downloadPathText);
+    if (unknownSource) {
+      return NextResponse.json(
+        { error: `覆盖路径引用了未知的 OpenList 源：${unknownSource}` },
+        { status: 400 }
+      );
     }
 
     // 验证集数
@@ -142,6 +168,8 @@ export async function POST(req: NextRequest) {
       enabled: enabled ?? true,
       onePerEpisode: Boolean(onePerEpisode),
       refillMissingEpisodes: Boolean(refillMissingEpisodes),
+      episodeRegex: episodeRegexText || undefined,
+      downloadPath: downloadPathText || undefined,
       lastCheckTime: 0,
       lastEpisode: episodeNum,
       createdAt: Date.now(),

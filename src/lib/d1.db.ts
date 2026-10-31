@@ -15,6 +15,9 @@ import {
   Notification,
   MovieRequest,
   PushSubscriptionRecord,
+  LocalSettingsSyncRecord,
+  SetLocalSettingsSyncOptions,
+  SetLocalSettingsSyncResult,
 } from './types';
 import { AdminConfig } from './admin.types';
 import { MangaReadRecord, MangaShelfItem } from './manga.types';
@@ -43,46 +46,13 @@ import { dispatchNotificationChannels } from './notification-dispatch';
  */
 export class D1Storage implements IStorage {
   private db: DatabaseAdapter;
-  private schemaReady: Promise<void>;
   public adapter: RedisHashAdapter;
 
   constructor(adapter: DatabaseAdapter) {
     this.db = adapter;
-    this.schemaReady = this.ensureMangaShelfColumns();
     // 创建 Redis Hash 兼容适配器用于设备管理
     this.adapter = new RedisHashAdapter(adapter);
   }
-
-  private async ensureMangaShelfColumns(): Promise<void> {
-    const statements = [
-      'ALTER TABLE manga_shelf ADD COLUMN latest_chapter_id TEXT',
-      'ALTER TABLE manga_shelf ADD COLUMN latest_chapter_name TEXT',
-      'ALTER TABLE manga_shelf ADD COLUMN latest_chapter_count INTEGER',
-      'ALTER TABLE manga_shelf ADD COLUMN unread_chapter_count INTEGER',
-    ];
-
-    for (const statement of statements) {
-      try {
-        const result = await this.db.prepare(statement).run();
-        if (
-          !result.success &&
-          result.error &&
-          !/duplicate column|already exists/i.test(result.error)
-        ) {
-          console.warn(
-            'D1Storage.ensureMangaShelfColumns warning:',
-            result.error
-          );
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        if (!/duplicate column|already exists|no such table/i.test(message)) {
-          console.warn('D1Storage.ensureMangaShelfColumns warning:', err);
-        }
-      }
-    }
-  }
-
 
   // ==================== 播放记录 ====================
 
@@ -116,9 +86,9 @@ export class D1Storage implements IStorage {
           INSERT INTO play_records (
             username, key, title, source_name, cover, year,
             episode_index, total_episodes, play_time, total_time,
-            save_time, search_title, new_episodes, is_anime
+            save_time, search_title, new_episodes, is_anime, is_duanju
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(username, key) DO UPDATE SET
             title = excluded.title,
             source_name = excluded.source_name,
@@ -131,7 +101,8 @@ export class D1Storage implements IStorage {
             save_time = excluded.save_time,
             search_title = excluded.search_title,
             new_episodes = excluded.new_episodes,
-            is_anime = excluded.is_anime
+            is_anime = excluded.is_anime,
+            is_duanju = COALESCE(excluded.is_duanju, play_records.is_duanju)
         `
         )
         .bind(
@@ -148,7 +119,9 @@ export class D1Storage implements IStorage {
           record.save_time,
           record.search_title || '',
           record.new_episodes || null,
-          record.is_anime ? 1 : 0
+          record.is_anime ? 1 : 0,
+          // undefined = 本次不表态（不是短剧页/判断不出），别冲掉已有的标记
+          record.is_duanju === undefined ? null : record.is_duanju ? 1 : 0
         )
         .run();
     } catch (err) {
@@ -864,9 +837,9 @@ export class D1Storage implements IStorage {
   async listMusicV2History(userName: string): Promise<MusicV2HistoryRecord[]> {
     try {
       const results = await this.db
-        // 按队列顺序返回；当前播放项由最大 last_played_at 决定
+        // 按队列顺序返回（sort_order 由拖拽维护）；当前播放项由最大 last_played_at 决定
         .prepare(
-          'SELECT * FROM music_v2_history WHERE username = ? ORDER BY created_at ASC, id ASC'
+          'SELECT * FROM music_v2_history WHERE username = ? ORDER BY sort_order ASC, created_at ASC, id ASC'
         )
         .bind(userName)
         .all();
@@ -889,6 +862,7 @@ export class D1Storage implements IStorage {
         lastQuality: row.last_quality || undefined,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
+        sortOrder: row.sort_order ?? undefined,
       }));
     } catch (err) {
       console.error('D1Storage.listMusicV2History error:', err);
@@ -906,9 +880,9 @@ export class D1Storage implements IStorage {
           `
           INSERT INTO music_v2_history (
             username, song_id, source, songmid, name, artist, album, cover, duration_text, duration_sec,
-            play_progress_sec, last_played_at, play_count, last_quality, created_at, updated_at
+            play_progress_sec, last_played_at, play_count, last_quality, created_at, updated_at, sort_order
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(username, song_id) DO UPDATE SET
             source = excluded.source,
             songmid = excluded.songmid,
@@ -922,7 +896,8 @@ export class D1Storage implements IStorage {
             last_played_at = excluded.last_played_at,
             play_count = excluded.play_count,
             last_quality = excluded.last_quality,
-            updated_at = excluded.updated_at
+            updated_at = excluded.updated_at,
+            sort_order = excluded.sort_order
         `
         )
         .bind(
@@ -941,7 +916,8 @@ export class D1Storage implements IStorage {
           record.playCount,
           record.lastQuality || null,
           record.createdAt,
-          record.updatedAt
+          record.updatedAt,
+          record.sortOrder ?? record.createdAt
         )
         .run();
     } catch (err) {
@@ -1242,6 +1218,7 @@ export class D1Storage implements IStorage {
       search_title: row.search_title || '',
       new_episodes: row.new_episodes || undefined,
       is_anime: row.is_anime === 1 || row.is_anime === true,
+      is_duanju: row.is_duanju === 1 || row.is_duanju === true,
     };
   }
 
@@ -2189,7 +2166,6 @@ export class D1Storage implements IStorage {
     key: string
   ): Promise<MangaShelfItem | null> {
     try {
-      await this.schemaReady;
       const result = await this.db
         .prepare('SELECT * FROM manga_shelf WHERE username = ? AND key = ?')
         .bind(userName, key)
@@ -2233,7 +2209,6 @@ export class D1Storage implements IStorage {
     item: MangaShelfItem
   ): Promise<void> {
     try {
-      await this.schemaReady;
       await this.db
         .prepare(
           `
@@ -2291,7 +2266,6 @@ export class D1Storage implements IStorage {
     userName: string
   ): Promise<{ [key: string]: MangaShelfItem }> {
     try {
-      await this.schemaReady;
       const results = await this.db
         .prepare(
           'SELECT * FROM manga_shelf WHERE username = ? ORDER BY save_time DESC'
@@ -3384,6 +3358,83 @@ export class D1Storage implements IStorage {
         .run();
     } catch (err) {
       console.error('D1Storage.setAdminConfig error:', err);
+      throw err;
+    }
+  }
+
+  // ---------- 本地设置云同步 ----------
+
+  async getUserLocalSettings(
+    userName: string
+  ): Promise<LocalSettingsSyncRecord | null> {
+    try {
+      const result = await this.db
+        .prepare(
+          `SELECT payload, payload_md5, payload_size, version, updated_at
+           FROM user_local_settings WHERE username = ?`
+        )
+        .bind(userName)
+        .first();
+      if (!result) return null;
+      return {
+        payload: result.payload as string,
+        payloadMd5: result.payload_md5 as string,
+        payloadSize: Number(result.payload_size),
+        version: Number(result.version),
+        updatedAt: Number(result.updated_at),
+      };
+    } catch (err) {
+      console.error('D1Storage.getUserLocalSettings error:', err);
+      return null;
+    }
+  }
+
+  async setUserLocalSettings(
+    userName: string,
+    payload: string,
+    opts: SetLocalSettingsSyncOptions
+  ): Promise<SetLocalSettingsSyncResult> {
+    try {
+      const now = Date.now();
+      let version = 1;
+
+      // 乐观锁：仅当期望版本匹配时才覆盖（无 expectedVersion 时无条件覆盖）
+      if (opts.expectedVersion !== undefined) {
+        const current = await this.getUserLocalSettings(userName);
+        if (current && current.version !== opts.expectedVersion) {
+          return { ok: false, version: current.version, updatedAt: current.updatedAt };
+        }
+        version = current ? current.version + 1 : 1;
+      } else {
+        const current = await this.getUserLocalSettings(userName);
+        version = current ? current.version + 1 : 1;
+      }
+
+      await this.db
+        .prepare(
+          `INSERT INTO user_local_settings
+             (username, payload, payload_md5, payload_size, version, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(username) DO UPDATE SET
+             payload = excluded.payload,
+             payload_md5 = excluded.payload_md5,
+             payload_size = excluded.payload_size,
+             version = excluded.version,
+             updated_at = excluded.updated_at`
+        )
+        .bind(
+          userName,
+          payload,
+          opts.payloadMd5,
+          opts.payloadSize,
+          version,
+          now
+        )
+        .run();
+
+      return { ok: true, version, updatedAt: now };
+    } catch (err) {
+      console.error('D1Storage.setUserLocalSettings error:', err);
       throw err;
     }
   }

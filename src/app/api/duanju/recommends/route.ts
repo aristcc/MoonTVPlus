@@ -4,6 +4,7 @@ import { NextResponse } from 'next/server';
 
 import { API_CONFIG, getCacheTime } from '@/lib/config';
 import { getDuanjuSources } from '@/lib/duanju';
+import { parseJsonLosslessIntegers } from '@/lib/json';
 import { SearchResult } from '@/lib/types';
 import { cleanHtmlTags } from '@/lib/utils';
 
@@ -16,7 +17,7 @@ let cachedRecommends: {
 } | null = null;
 
 interface ApiSearchItem {
-  vod_id: string;
+  vod_id: string | number;
   vod_name: string;
   vod_pic: string;
   vod_remarks?: string;
@@ -28,12 +29,28 @@ interface ApiSearchItem {
   type_name?: string;
 }
 
-interface CmsClassResponse {
-  class?: Array<{
-    type_id: string | number;
-    type_name: string;
-  }>;
+interface CmsClassItem {
+  type_id: string | number;
+  type_pid?: string | number;
+  type_name: string;
 }
+
+interface CmsClassResponse {
+  class?: CmsClassItem[];
+}
+
+// 请求指定分类下的视频列表
+const fetchVideoList = async (api: string, typeId: string | number) => {
+  const response = await fetch(`${api}?ac=videolist&t=${typeId}&pg=1`, {
+    headers: API_CONFIG.search.headers,
+  });
+  if (!response.ok) return null;
+  const data = parseJsonLosslessIntegers<{ list?: ApiSearchItem[] }>(
+    await response.text()
+  );
+  if (!data?.list || !Array.isArray(data.list)) return null;
+  return data.list as ApiSearchItem[];
+};
 
 /**
  * 获取热播短剧推荐视频
@@ -86,26 +103,24 @@ export async function GET() {
       throw new Error('获取分类列表失败');
     }
 
-    const classData: CmsClassResponse = await classResponse.json();
+    const classData = parseJsonLosslessIntegers<CmsClassResponse>(
+      await classResponse.text()
+    );
 
     // 找到短剧分类的ID
-    let duanjuTypeId: string | number | null = null;
+    let duanjuClass: CmsClassItem | null = null;
     if (classData.class && Array.isArray(classData.class)) {
-      const duanjuClass = classData.class.find((item) => {
+      duanjuClass = classData.class.find((item) => {
         const typeName = item.type_name?.toLowerCase() || '';
         return (
           typeName.includes('短剧') ||
           typeName.includes('短视频') ||
           typeName.includes('微短剧')
         );
-      });
-
-      if (duanjuClass) {
-        duanjuTypeId = duanjuClass.type_id;
-      }
+      }) || null;
     }
 
-    if (!duanjuTypeId) {
+    if (!duanjuClass) {
       return NextResponse.json({
         code: 200,
         message: '未找到短剧分类',
@@ -113,26 +128,27 @@ export async function GET() {
       });
     }
 
+    const duanjuTypeId = duanjuClass.type_id;
     console.log(`短剧分类ID: ${duanjuTypeId}`);
 
-    // 请求该分类下的视频列表
-    const videoListUrl = `${firstSource.api}?ac=videolist&t=${duanjuTypeId}&pg=1`;
-    const videoListResponse = await fetch(videoListUrl, {
-      headers: API_CONFIG.search.headers,
-    });
+    // 短剧分类下的直接子分类；带二级分类的源通常把内容挂在二级分类下，
+    // 一级分类为空时依次尝试子分类，取第一个有内容的
+    const childTypeIds = (classData.class || [])
+      .filter(
+        (item) => (item.type_pid ?? 0).toString() === duanjuTypeId.toString()
+      )
+      .map((item) => item.type_id);
 
-    if (!videoListResponse.ok) {
-      throw new Error('获取视频列表失败');
+    let videoList: ApiSearchItem[] | null = null;
+    for (const typeId of [duanjuClass.type_id, ...childTypeIds]) {
+      const list = await fetchVideoList(firstSource.api, typeId);
+      if (list && list.length > 0) {
+        videoList = list;
+        break;
+      }
     }
 
-    const videoListData = await videoListResponse.json();
-
-    if (
-      !videoListData ||
-      !videoListData.list ||
-      !Array.isArray(videoListData.list) ||
-      videoListData.list.length === 0
-    ) {
+    if (!videoList || videoList.length === 0) {
       return NextResponse.json({
         code: 200,
         message: '暂无短剧视频',
@@ -141,7 +157,7 @@ export async function GET() {
     }
 
     // 处理视频数据
-    const videos: SearchResult[] = videoListData.list.map((item: ApiSearchItem) => {
+    const videos: SearchResult[] = videoList.map((item: ApiSearchItem) => {
       let episodes: string[] = [];
       let titles: string[] = [];
 

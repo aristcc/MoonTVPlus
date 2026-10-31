@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { API_CONFIG, getCacheTime, getConfig } from '@/lib/config';
 import { getDuanjuSources, isDuanjuTypeName } from '@/lib/duanju';
+import { parseJsonLosslessIntegers } from '@/lib/json';
 import { yellowWords } from '@/lib/yellow';
 
 export const runtime = 'nodejs';
@@ -11,6 +12,7 @@ export const runtime = 'nodejs';
 interface CmsClassResponse {
   class?: Array<{
     type_id: string | number;
+    type_pid?: string | number;
     type_name: string;
   }>;
 }
@@ -46,13 +48,25 @@ export async function GET(request: NextRequest) {
       throw new Error('获取分类列表失败');
     }
 
-    const data: CmsClassResponse = await response.json();
+    const data = parseJsonLosslessIntegers<CmsClassResponse>(
+      await response.text()
+    );
     const config = await getConfig();
 
-    const categories = (data.class || [])
+    const allClasses = data.class || [];
+    const duanjuIds = new Set(
+      allClasses
+        .filter((item) => isDuanjuTypeName(item.type_name || ''))
+        .map((item) => item.type_id.toString())
+    );
+
+    const categories = allClasses
       .filter((item) => {
         const typeName = item.type_name || '';
-        if (!isDuanjuTypeName(typeName)) return false;
+        const id = item.type_id.toString();
+        const pid = (item.type_pid ?? 0).toString();
+        // 命中短剧关键词的分类本身，或其直接子分类（子分类名称可能不含关键词）
+        if (!duanjuIds.has(id) && !duanjuIds.has(pid)) return false;
         if (!config.SiteConfig.DisableYellowFilter) {
           return !yellowWords.some((word: string) => typeName.includes(word));
         }
@@ -61,6 +75,8 @@ export async function GET(request: NextRequest) {
       .map((item) => ({
         id: item.type_id.toString(),
         name: item.type_name,
+        // 一级分类 type_pid 为 0，二级分类指向父分类 id
+        pid: (item.type_pid ?? 0).toString(),
       }));
 
     const defaultCategory = categories[0] || null;
