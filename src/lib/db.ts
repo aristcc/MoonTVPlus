@@ -13,7 +13,10 @@ import {
   DanmakuFilterConfig,
   Favorite,
   IStorage,
+  LocalSettingsSyncRecord,
   PlayRecord,
+  SetLocalSettingsSyncOptions,
+  SetLocalSettingsSyncResult,
   SkipConfig,
 } from './types';
 
@@ -184,9 +187,6 @@ function getD1Adapter(): any {
   db.pragma('journal_mode = WAL'); // 启用 WAL 模式提升性能
   db.pragma('foreign_keys = ON'); // 与 D1 保持一致，启用外键约束
   db.pragma('busy_timeout = 5000'); // 避免启动阶段或并发写入时立即锁失败
-
-  console.log('Using SQLite database (non-Cloudflare mode)');
-  console.log('Database location:', dbPath);
 
   return new SQLiteAdapter(db);
 }
@@ -1038,6 +1038,28 @@ export class DbManager {
     if (typeof (this.storage as any).setAdminConfig === 'function') {
       await (this.storage as any).setAdminConfig(config);
     }
+  }
+
+  // ---------- 本地设置云同步 ----------
+  async getUserLocalSettings(
+    userName: string
+  ): Promise<LocalSettingsSyncRecord | null> {
+    if (typeof (this.storage as any).getUserLocalSettings === 'function') {
+      return (this.storage as any).getUserLocalSettings(userName);
+    }
+    return null;
+  }
+
+  async setUserLocalSettings(
+    userName: string,
+    payload: string,
+    opts: SetLocalSettingsSyncOptions
+  ): Promise<SetLocalSettingsSyncResult> {
+    if (typeof (this.storage as any).setUserLocalSettings === 'function') {
+      return (this.storage as any).setUserLocalSettings(userName, payload, opts);
+    }
+    // 存储后端不支持时静默忽略（等价于从未开启）
+    return { ok: true, version: 0, updatedAt: Date.now() };
   }
 
   // ---------- 跳过片头片尾配置 ----------
