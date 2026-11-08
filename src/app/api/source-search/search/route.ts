@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { API_CONFIG, getAvailableApiSites } from '@/lib/config';
+import { parseJsonLosslessIntegers } from '@/lib/json';
 import { SearchResult } from '@/lib/types';
 
 export const runtime = 'nodejs';
@@ -52,8 +53,8 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const includeSpecialSources = request.nextUrl.searchParams.get('special') === '1';
-    const apiSites = await getAvailableApiSites(authInfo.username, includeSpecialSources);
+    const specialOnly = request.nextUrl.searchParams.get('special') === '1';
+    const apiSites = await getAvailableApiSites(authInfo.username, specialOnly);
     const targetSite = apiSites.find((site) => site.key === sourceKey);
 
     if (!targetSite) {
@@ -74,7 +75,9 @@ export async function GET(request: NextRequest) {
       throw new Error('搜索失败');
     }
 
-    const searchData: CmsVideoResponse = await searchResponse.json();
+    const searchData = parseJsonLosslessIntegers<CmsVideoResponse>(
+      await searchResponse.text()
+    );
 
     if (!searchData.list || !Array.isArray(searchData.list)) {
       return NextResponse.json({
