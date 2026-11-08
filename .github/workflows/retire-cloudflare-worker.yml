@@ -41,8 +41,8 @@ jobs:
           test -n "${CLOUDFLARE_API_TOKEN}"
           test -n "${CLOUDFLARE_ACCOUNT_ID}"
 
-          identity="$(wrangler whoami --json)"
-          printf '%s' "${identity}" | jq -e --arg account "${CLOUDFLARE_ACCOUNT_ID}" '.accounts | any(.id == $account)' >/dev/null
+          identity="$(wrangler whoami)"
+          printf '%s' "${identity}" | rg -F "${CLOUDFLARE_ACCOUNT_ID}" >/dev/null
           echo "Authenticated Cloudflare account matches the deployment secret."
 
           versions="$(wrangler versions list --name moontv-plus)"
@@ -57,7 +57,7 @@ jobs:
 
           wrangler delete --name moontv-plus --force
 
-          if wrangler deployments list --name moontv-plus --json > "$RUNNER_TEMP/remaining-worker.txt" 2>&1; then
+          if wrangler deployments list --name moontv-plus > "$RUNNER_TEMP/remaining-worker.txt" 2>&1; then
             echo "The Worker still exists after the delete command."
             cat "$RUNNER_TEMP/remaining-worker.txt"
             exit 1
