@@ -45,8 +45,8 @@ jobs:
           printf '%s' "${identity}" | jq -e --arg account "${CLOUDFLARE_ACCOUNT_ID}" '.accounts | any(.id == $account)' >/dev/null
           echo "Authenticated Cloudflare account matches the deployment secret."
 
-          versions="$(wrangler versions list --name moontv-plus --json)"
-          printf '%s' "${versions}" | jq -e --arg version "${EXPECTED_VERSION_ID}" 'tostring | contains($version)' >/dev/null
+          versions="$(wrangler versions list --name moontv-plus)"
+          printf '%s' "${versions}" | rg -F "${EXPECTED_VERSION_ID}" >/dev/null
           echo "Found the recorded MoonTV Plus Worker deployment."
 
           if [[ "${DRY_RUN}" == "true" ]]; then
