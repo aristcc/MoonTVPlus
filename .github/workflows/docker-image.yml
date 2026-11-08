@@ -40,6 +40,26 @@ jobs:
 
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify Docker build context exclusions
+        run: |
+          set -euo pipefail
+          if ! grep -qxF '.git' .dockerignore; then
+            echo "::error::The root .dockerignore must exclude .git."
+            exit 1
+          fi
+          if grep -Eq '^[[:space:]]*!' .dockerignore; then
+            echo "::error::Negated Docker ignore rules may re-include .git metadata."
+            exit 1
+          fi
+          for ignore_file in Dockerfile.dockerignore Dockerfile.lite.dockerignore; do
+            if [[ -f "${ignore_file}" ]]; then
+              echo "::error::${ignore_file} overrides the root .dockerignore."
+              exit 1
+            fi
+          done
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

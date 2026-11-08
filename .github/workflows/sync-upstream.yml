@@ -47,13 +47,37 @@ jobs:
           echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
           echo "upstream_short=${upstream_short}" >> "$GITHUB_OUTPUT"
 
-          if git diff --quiet "${base_sha}" "${upstream_sha}" -- . ':!.github/workflows/**'; then
+          if ! git show "${base_sha}:.dockerignore" | grep -qxF '.git'; then
+            echo "::error::The fork .dockerignore must keep the .git exclusion."
+            exit 1
+          fi
+          if git show "${base_sha}:.dockerignore" | grep -Eq '^[[:space:]]*!'; then
+            echo "::error::Negated Docker ignore rules are not allowed; they may re-include .git metadata."
+            exit 1
+          fi
+
+          for ignore_file in Dockerfile.dockerignore Dockerfile.lite.dockerignore; do
+            if git cat-file -e "${base_sha}:${ignore_file}" 2>/dev/null || git cat-file -e "${upstream_sha}:${ignore_file}" 2>/dev/null; then
+              echo "::error::${ignore_file} overrides the root .dockerignore; review its build-context rules before syncing."
+              exit 1
+            fi
+          done
+
+          # The fork owns .dockerignore to keep Git metadata out of Docker contexts.
+          base_dockerignore="$(git show "${base_sha}:.dockerignore" | sed '/^\.git$/d')"
+          upstream_dockerignore="$(git show "${upstream_sha}:.dockerignore" | sed '/^\.git$/d')"
+          if [[ "${base_dockerignore}" != "${upstream_dockerignore}" ]]; then
+            echo "::error::Upstream changed .dockerignore beyond the fork's .git exclusion; review and merge that change before syncing."
+            exit 1
+          fi
+
+          if git diff --quiet "${base_sha}" "${upstream_sha}" -- . ':!.github/workflows/**' ':!.dockerignore'; then
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
             echo "Fork is already up to date with upstream ${upstream_short}."
             exit 0
           fi
 
-          git diff --binary "${base_sha}" "${upstream_sha}" -- . ':!.github/workflows/**' > "$RUNNER_TEMP/upstream.patch"
+          git diff --binary "${base_sha}" "${upstream_sha}" -- . ':!.github/workflows/**' ':!.dockerignore' > "$RUNNER_TEMP/upstream.patch"
           echo "has_changes=true" >> "$GITHUB_OUTPUT"
 
       - name: Save update patch
@@ -145,7 +169,6 @@ jobs:
           fi
 
           git apply --index --3way upstream-sync-patch/upstream.patch
-          git diff --cached --check
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "Sync MoonTVPlus to upstream ${UPSTREAM_SHORT}"
