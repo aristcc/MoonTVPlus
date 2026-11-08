@@ -42,11 +42,11 @@ jobs:
           test -n "${CLOUDFLARE_ACCOUNT_ID}"
 
           identity="$(wrangler whoami)"
-          printf '%s' "${identity}" | rg -F "${CLOUDFLARE_ACCOUNT_ID}" >/dev/null
+          printf '%s' "${identity}" | grep -F "${CLOUDFLARE_ACCOUNT_ID}" >/dev/null
           echo "Authenticated Cloudflare account matches the deployment secret."
 
           versions="$(wrangler versions list --name moontv-plus)"
-          printf '%s' "${versions}" | rg -F "${EXPECTED_VERSION_ID}" >/dev/null
+          printf '%s' "${versions}" | grep -F "${EXPECTED_VERSION_ID}" >/dev/null
           echo "Found the recorded MoonTV Plus Worker deployment."
 
           if [[ "${DRY_RUN}" == "true" ]]; then
@@ -63,7 +63,7 @@ jobs:
             exit 1
           fi
 
-          if ! rg -qi '10007|not found' "$RUNNER_TEMP/remaining-worker.txt"; then
+          if ! grep -Eiq '10007|not found' "$RUNNER_TEMP/remaining-worker.txt"; then
             echo "Could not confirm that the Worker is gone."
             cat "$RUNNER_TEMP/remaining-worker.txt"
             exit 1
